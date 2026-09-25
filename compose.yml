@@ -1,0 +1,44 @@
+# Rootless Podman: podman-compose up -d  (or: make up)
+x-vpn: &vpn
+  build: { context: ., dockerfile: Containerfile }
+  image: localhost/pia-tunnel:latest
+  restart: always
+  cap_add: [NET_ADMIN]
+  devices: ["/dev/net/tun:/dev/net/tun"]
+  volumes:
+    - ./secrets/pia-auth.txt:/run/secrets/pia-auth.txt:ro,z
+    - ./secrets/socks-auth.txt:/run/secrets/socks-auth.txt:ro,z
+    - ./servers.txt:/run/servers.txt:ro,z
+
+services:
+  vpn1:
+    <<: *vpn
+    container_name: vpn1
+    environment:
+      PIA_REGION: ${VPN1_REGION}
+      PIA_SLOT: "1"
+      PIA_PORT: ${PIA_PORT}
+      SOCKS_HOST: ${SOCKS_HOST}
+      SOCKS_PORT: ${SOCKS_PORT}
+
+  vpn2:
+    <<: *vpn
+    container_name: vpn2
+    environment:
+      PIA_REGION: ${VPN2_REGION}
+      PIA_SLOT: "2"
+      PIA_PORT: ${PIA_PORT}
+      SOCKS_HOST: ${SOCKS_HOST}
+      SOCKS_PORT: ${SOCKS_PORT}
+
+  haproxy:
+    image: docker.io/library/haproxy:3.2-alpine
+    container_name: vpn-lb
+    restart: always
+    depends_on: [vpn1, vpn2]
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro,Z
+    ports:
+      - "${BIND}:${LB_SOCKS_PORT}:1080"
+      - "${BIND}:${LB_HTTP_PORT}:8888"
+      - "127.0.0.1:${LB_STATS_PORT}:8404"
