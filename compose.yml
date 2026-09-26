@@ -9,6 +9,7 @@ x-vpn: &vpn
     - ./secrets/pia-auth.txt:/run/secrets/pia-auth.txt:ro,z
     - ./secrets/socks-auth.txt:/run/secrets/socks-auth.txt:ro,z
     - ./servers.txt:/run/servers.txt:ro,z
+    - vpnstate:/shared:z
 
 services:
   vpn1:
@@ -17,6 +18,10 @@ services:
     environment:
       PIA_REGION: ${VPN1_REGION}
       PIA_SLOT: "1"
+      NAME: vpn1
+      PEER: vpn2
+      ROTATE_PERIOD: ${ROTATE_PERIOD:-6000}
+      ROTATE_MIN_AGE: ${ROTATE_MIN_AGE:-900}
       PIA_PORT: ${PIA_PORT}
       SOCKS_HOST: ${SOCKS_HOST}
       SOCKS_PORT: ${SOCKS_PORT}
@@ -27,6 +32,10 @@ services:
     environment:
       PIA_REGION: ${VPN2_REGION}
       PIA_SLOT: "2"
+      NAME: vpn2
+      PEER: vpn1
+      ROTATE_PERIOD: ${ROTATE_PERIOD:-6000}
+      ROTATE_MIN_AGE: ${ROTATE_MIN_AGE:-900}
       PIA_PORT: ${PIA_PORT}
       SOCKS_HOST: ${SOCKS_HOST}
       SOCKS_PORT: ${SOCKS_PORT}
@@ -42,3 +51,6 @@ services:
       - "${BIND}:${LB_SOCKS_PORT}:1080"
       - "${BIND}:${LB_HTTP_PORT}:8888"
       - "127.0.0.1:${LB_STATS_PORT}:8404"
+
+volumes:
+  vpnstate:

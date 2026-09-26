@@ -2,8 +2,9 @@
 
 A local, fault-tolerant VPN gateway built on **Private Internet Access (PIA)** and **rootless Podman**.
 You connect to **one** address (a SOCKS5 or HTTP proxy), and behind it run **two independent VPN
-tunnels**: a primary and a backup. If the primary goes down, traffic automatically moves to the
-backup; once the primary recovers, traffic moves back on its own.
+tunnels**: an active one and a standby. If the active tunnel fails — or is about to reconnect —
+traffic moves to the standby within seconds and stays there, so your public IP changes as rarely
+as possible.
 
 ## Why
 
@@ -12,7 +13,8 @@ reconnects. From some countries, direct connections to PIA are blocked, so **Mul
 OpenVPN through PIA's SOCKS5 proxy. This project reproduces the same connection the PIA GUI makes
 (OpenVPN UDP 853, AES-256-GCM, via SOCKS5), but as two tunnels with automatic failover:
 
-- **Stability** — a failing tunnel or PIA server is invisible to applications (failover in ~8–15 s).
+- **Stability** — a failing tunnel or PIA server is invisible to new connections (failover in ~1–5 s);
+  PIA's 2-hour proxy session limit is handled by reconnecting the tunnels in turn, ahead of time.
 - **No leaks** — if a tunnel dies, its traffic is blocked instead of leaving directly with your real IP.
 - **Selective** — only applications you point at the proxy use the VPN; everything else goes direct.
 - **Network-wide** — the proxy can be exposed on your LAN for phones, TVs, etc.
@@ -22,13 +24,14 @@ OpenVPN through PIA's SOCKS5 proxy. This project reproduces the same connection 
 ```
 applications ──→ 127.0.0.1:1081 (SOCKS5) / :8888 (HTTP)
                           │
-                 HAProxy (vpn-lb) — every 4 s sends an HTTP request THROUGH each tunnel
+                 HAProxy (vpn-lb) — health checks + agent checks, all traffic to the active tunnel
                 ┌─────────┴─────────┐
-          vpn1 (primary)      vpn2 (backup, used only while vpn1 is down)
+          vpn1 (active)       vpn2 (standby)            ← roles swap on failure / planned reconnect
           openvpn + gost      openvpn + gost
+          + watchdog          + watchdog
+                │                   │
+          SOCKS5 proxy A      SOCKS5 proxy B            ← different PIA multi-hop proxies
                 └─────────┬─────────┘
-          PIA SOCKS5 multi-hop proxy proxy-nl.privateinternetaccess.com:1080
-                          │
            PIA servers (different servers, same or different regions)
 ```
 
@@ -36,9 +39,22 @@ applications ──→ 127.0.0.1:1081 (SOCKS5) / :8888 (HTTP)
   [gost](https://github.com/go-gost/gost) (HTTP/SOCKS5 server for clients) + dnsmasq (DNS cache).
   Each container has a kill switch: only the SOCKS5 proxy is reachable directly, everything else
   goes through `tun0` only. DNS is resolved by PIA's DNS inside the tunnel.
-- **vpn-lb** (`haproxy/haproxy.cfg`) — HAProxy in TCP mode. The health check exercises the whole
-  chain (`GET http://www.gstatic.com/generate_204` through the tunnel): 2 consecutive failures take
-  a tunnel out of service, 2 successes bring it back.
+- **watchdog** (`watchdog.sh`, in each tunnel container) — pings the VPN gateway every second:
+  - 3 lost pings + a failed HTTP check → reconnect immediately (instead of openvpn's ~30 s timeout);
+  - more than 10% loss over a minute while the other tunnel is healthier → switch to another server;
+  - planned reconnect every `ROTATE_PERIOD` (100 min), before the proxy's ~2 h session limit.
+    The tunnels are scheduled half a period apart, and the active one hands its role to the other
+    before reconnecting, so new connections never see an outage.
+
+  The two watchdogs agree on which tunnel is **active** (a shared volume). The role moves only when
+  the active tunnel fails or is about to reconnect — traffic does not jump back afterwards, so the
+  public IP changes as rarely as possible.
+- **vpn-lb** (`haproxy/haproxy.cfg`) — HAProxy in TCP mode. An **agent check** asks each watchdog
+  every second for its state (`100%` active / `0%` standby / `maint` reconnecting), so traffic moves
+  within ~1 s. A **health check** additionally exercises the whole chain
+  (`GET http://www.gstatic.com/generate_204` through the tunnel) as a safety net.
+- **Different proxies per tunnel** — `SOCKS_HOST` may be a hostname or a list; tunnel N uses the
+  N-th address. A problem with one proxy affects only one tunnel.
 - **servers.txt** — PIA server IPs taken from the PIA client's cache (`pia-servers.py`). Tunnels
   do not depend on the host's DNS. Tunnels in the
   same region start on different servers.
@@ -83,10 +99,10 @@ Any machine that runs Podman is enough, including a Raspberry Pi or a small VPS.
    cp .env.example .env
    ```
    ```ini
-   VPN1_REGION=poland        # primary tunnel (region id — see: make regions)
-   VPN2_REGION=poland        # backup; a different region also protects against a whole-region outage
+   VPN1_REGION=poland        # first tunnel (region id — see: make regions)
+   VPN2_REGION=poland        # second; a different region also protects against a whole-region outage
    PIA_PORT=853              # PIA UDP port: 853 / 8080 / 123 / 53
-   SOCKS_HOST=proxy-nl.privateinternetaccess.com  # PIA SOCKS5 proxy (a hostname or one of its IPs)
+   SOCKS_HOST=proxy-nl.privateinternetaccess.com  # PIA SOCKS5 proxy: hostname or IP list; tunnel N uses the N-th
    SOCKS_PORT=1080
    BIND=127.0.0.1            # 127.0.0.1 = this machine only, 0.0.0.0 = whole LAN (no password!)
    LB_SOCKS_PORT=1081
@@ -120,10 +136,11 @@ Any machine that runs Podman is enough, including a Raspberry Pi or a small VPS.
 ### Testing failover
 
 ```sh
-make ip                  # LB = vpn1's IP
-podman stop vpn1         # after ~8–15 s, LB = vpn2's IP
-make ip
-podman start vpn1        # after ~15–20 s, traffic returns to vpn1
+make ip                                                   # LB = vpn1's IP
+podman exec vpn1 ip route replace blackhole <vpn1-proxy>/32  # simulate a proxy outage on vpn1
+make ip                                                   # ~5 s later: LB = vpn2's IP
+podman restart vpn1                                       # vpn1 comes back as standby; traffic stays on vpn2
+podman logs vpn1 | grep watchdog                          # what the watchdog decided and why
 ```
 
 ## Running alongside the PIA client
@@ -144,11 +161,15 @@ so the PIA client can be either connected or disconnected. Recommendations:
 | `no servers for region` | region id in `.env` (`make regions`), then `make servers` |
 | tunnel never comes up, no `Peer Connection Initiated` | proxy reachability: `curl --socks5 USER:PASS@proxy-nl.privateinternetaccess.com:1080 https://ipinfo.io/ip` |
 | `permission denied` on `/dev/net/tun` | `sudo setsebool -P container_use_devices=true` |
-| both tunnels drop at the same time | don't run extra tunnels on the same account/proxy; the shared proxy is a single point of failure |
+| both tunnels drop at the same time | check that `SOCKS_HOST` gives each tunnel a different proxy (`podman logs vpn1 \| grep socks5`); don't run extra tunnels on the same account |
+| reconnects every ~2 h | expected: PIA's proxy limits a session to ~2 h (the PIA client reconnects too). The watchdog does it earlier, one tunnel at a time |
 
 ## Limitations
 
-- Both tunnels go through **one** PIA SOCKS5 proxy: if it is unreachable, both tunnels are down.
+- PIA's proxy ends every session after ~2 h, so each tunnel reconnects every 100 min. **Long-lived
+  connections** (downloads, SSH, calls) on the active tunnel break at its reconnect — new connections
+  are unaffected. This is a limit of the proxy; the PIA client has the same behaviour.
+- Both proxies belong to PIA: a PIA-wide proxy outage takes down both tunnels.
 - Servers within one PIA region usually share a subnet/data center; to survive a region outage,
   put the backup tunnel in a different region.
 - This project is not affiliated with Private Internet Access. You need your own paid PIA account;

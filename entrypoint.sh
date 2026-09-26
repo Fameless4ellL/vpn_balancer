@@ -12,8 +12,12 @@ PIA_IPS=$(awk -v r="$PIA_REGION" '$1==r {print $2}' /run/servers.txt)
 N=$(echo "$PIA_IPS" | grep -c .) || true
 [ "$N" -gt 0 ] || { echo "no servers for region '$PIA_REGION' in servers.txt" >&2; exit 1; }
 PIA_IPS=$(echo "$PIA_IPS" | awk -v k=$(( (PIA_SLOT - 1) % N )) -v n="$N" '{a[NR-1]=$0} END {for (i=0;i<n;i++) print a[(i+k)%n]}')
-SOCKS_IP=$(getent ahostsv4 "$SOCKS_HOST" | awk '{print $1; exit}')
-[ -n "$SOCKS_IP" ] || { echo "cannot resolve $SOCKS_HOST" >&2; exit 1; }
+# SOCKS_HOST may list several proxies (IPs or hostnames, space/comma separated); tunnel N takes the
+# N-th address, so tunnels don't share one proxy - a proxy failure or session reset hits only one of them.
+SOCKS_IPS=$(for h in $(echo "$SOCKS_HOST" | tr ',' ' '); do getent ahostsv4 "$h" | awk '{print $1}' | sort -u; done | awk '!seen[$0]++')
+M=$(echo "$SOCKS_IPS" | grep -c .) || true
+[ "$M" -gt 0 ] || { echo "cannot resolve $SOCKS_HOST" >&2; exit 1; }
+SOCKS_IP=$(echo "$SOCKS_IPS" | sed -n "$(( (PIA_SLOT - 1) % M + 1 ))p")
 
 GW=$(ip route show default | awk '{print $3; exit}')
 ip route replace "$SOCKS_IP/32" via "$GW" dev eth0
@@ -62,5 +66,15 @@ EOF
 
 echo "PIA $PIA_REGION servers (in order): $(echo $PIA_IPS) port $PIA_PORT via socks5 $SOCKS_IP:$SOCKS_PORT"
 gost -L "http://:8888" -L "socks5://:1080" &
-# openvpn is the main process: if it exits, the container restarts (restart: always)
-exec openvpn --config /etc/openvpn/pia.conf
+
+# HAProxy agent-check: replies with the watchdog's verdict ("ready up" / "maint")
+echo maint > /run/agent
+socat TCP-LISTEN:9999,fork,reuseaddr SYSTEM:'cat /run/agent' &
+
+openvpn --config /etc/openvpn/pia.conf &
+OVPN_PID=$!
+OVPN_PID=$OVPN_PID /watchdog.sh &
+
+# openvpn is the main process: if it exits, the container exits and is restarted (restart: always)
+trap 'kill -TERM "$OVPN_PID" 2>/dev/null' TERM INT
+wait "$OVPN_PID"
