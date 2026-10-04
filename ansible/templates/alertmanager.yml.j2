@@ -1,0 +1,16 @@
+route:
+  receiver: "{{ vpn_telegram | ternary('telegram', 'null') }}"
+  group_by: [alertname]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: "null"
+{% if vpn_telegram %}
+  - name: telegram
+    telegram_configs:
+      - bot_token_file: /etc/alertmanager/telegram-bot-token
+        chat_id: {{ telegram_chat_id }}
+        send_resolved: true
+{% endif %}

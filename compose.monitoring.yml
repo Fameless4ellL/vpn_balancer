@@ -1,0 +1,56 @@
+services:
+  prometheus:
+    image: docker.io/prom/prometheus:v3.15.0
+    container_name: vpn-prometheus
+    restart: always
+    depends_on: [haproxy]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=1GB
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro,z
+      - ./monitoring/rules.yml:/etc/prometheus/rules.yml:ro,z
+      - prometheus-data:/prometheus
+    ports:
+      - "${MONITORING_BIND:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
+
+  alertmanager:
+    image: docker.io/prom/alertmanager:v0.34.1
+    container_name: vpn-alertmanager
+    restart: always
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro,z
+      - ./secrets/telegram-bot-token.txt:/etc/alertmanager/telegram-bot-token:ro,z
+      - alertmanager-data:/alertmanager
+    ports:
+      - "${MONITORING_BIND:-127.0.0.1}:${ALERTMANAGER_PORT:-9093}:9093"
+
+  grafana:
+    image: docker.io/grafana/grafana:13.2.3
+    container_name: vpn-grafana
+    restart: always
+    depends_on: [prometheus]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana-admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/vpn.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro,z
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro,z
+      - ./secrets/grafana-admin.txt:/run/secrets/grafana-admin:ro,z
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${MONITORING_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
+
+volumes:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:

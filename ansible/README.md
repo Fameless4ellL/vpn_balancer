@@ -15,6 +15,12 @@ ansible-playbook site.yml -K --ask-vault-pass    # -K: sudo password for host pr
 ```
 
 Settings (regions, ports, `bind`) are in `group_vars/vpn/vars.yml`; hosts are in `inventory.yml`.
+
+Monitoring (Prometheus + Alertmanager + Grafana) is on by default (`vpn_monitoring: true`) and needs
+`vault_grafana_admin_password` in the vault. For Telegram alerts, set `telegram_chat_id` in `vars.yml`
+and `vault_telegram_bot_token` in the vault. Changing a dashboard or an alert rule restarts only the
+monitoring containers, never the tunnels.
+
 The stack is deployed to `~/.local/share/vpn_balancer`. If it is already running from the repo directory,
 the playbook stops with a message - run `make down` there first.
 

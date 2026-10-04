@@ -4,3 +4,5 @@ vault_pia_user: p1234567
 vault_pia_password: PIA_PASSWORD
 vault_socks_user: x1234567
 vault_socks_password: SOCKS_PASSWORD
+vault_grafana_admin_password: CHANGE_ME     # Grafana user: admin
+vault_telegram_bot_token: ""                # from @BotFather; empty = no Telegram alerts

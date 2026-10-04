@@ -16,6 +16,20 @@
       - tls-verify.sh
       - pia-servers.py
       - haproxy/haproxy.cfg
+    # Changes here restart only the monitoring containers, not the tunnels.
+    # monitoring/alertmanager.yml is not copied: it is rendered from templates/alertmanager.yml.j2.
+    vpn_monitoring_files:
+      - monitoring/prometheus.yml
+      - monitoring/rules.yml
+      - monitoring/grafana/provisioning/datasources/prometheus.yml
+      - monitoring/grafana/provisioning/dashboards/vpn.yml
+      - monitoring/grafana/dashboards/vpn.json
+    vpn_monitoring_dirs:
+      - monitoring/grafana/provisioning/datasources
+      - monitoring/grafana/provisioning/dashboards
+      - monitoring/grafana/dashboards
+    vpn_monitoring_ports: ["{{ grafana_port }}", "{{ prometheus_port }}", "{{ alertmanager_port }}"]
+    vpn_telegram: "{{ telegram_chat_id | string | length > 0 and telegram_bot_token | length > 0 }}"
     vpn_xdg_env:
       XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts.user_uid }}"
 
@@ -55,6 +69,15 @@
           loop: ["{{ lb_socks_port }}", "{{ lb_http_port }}"]
           when: vpn_open_firewall | bool
 
+        - name: Open monitoring ports on the LAN
+          ansible.posix.firewalld:
+            port: "{{ item }}/tcp"
+            permanent: true
+            immediate: true
+            state: enabled
+          loop: "{{ vpn_monitoring_ports }}"
+          when: vpn_monitoring | bool and monitoring_bind != '127.0.0.1'
+
     - name: Check that the PIA client is installed (servers.txt and the CA certificate come from it)
       ansible.builtin.stat:
         path: /opt/piavpn/etc/data.json
@@ -64,6 +87,12 @@
       ansible.builtin.assert:
         that: vpn_pia_data.stat.exists
         fail_msg: Install the PIA client (/opt/piavpn) on {{ inventory_hostname }} first; it may stay disconnected.
+
+    - name: Fail without a Grafana password
+      ansible.builtin.assert:
+        that: vault_grafana_admin_password is defined
+        fail_msg: Add vault_grafana_admin_password to group_vars/vpn/vault.yml (ansible-vault edit), or set vpn_monitoring false.
+      when: vpn_monitoring | bool
 
     - name: Find a running stack
       ansible.builtin.command: >-
@@ -82,20 +111,23 @@
 
     - name: Create directories
       ansible.builtin.file:
-        path: "{{ vpn_deploy_dir }}/{{ item.path }}"
+        path: "{{ vpn_deploy_dir }}/{{ item }}"
         state: directory
-        mode: "{{ item.mode }}"
-      loop:
-        - { path: "", mode: "0755" }
-        - { path: haproxy, mode: "0755" }
-        - { path: secrets, mode: "0700" }
+        mode: "0755"
+      loop: "{{ ['', 'haproxy'] + (vpn_monitoring_dirs if vpn_monitoring | bool else []) }}"
+
+    - name: Create the secrets directory
+      ansible.builtin.file:
+        path: "{{ vpn_deploy_dir }}/secrets"
+        state: directory
+        mode: "0700"
 
     - name: Copy runtime files
       ansible.builtin.copy:
         src: "{{ vpn_src_dir }}/{{ item }}"
         dest: "{{ vpn_deploy_dir }}/{{ item }}"
         mode: preserve
-      loop: "{{ vpn_runtime_files }}"
+      loop: "{{ vpn_runtime_files + (['compose.monitoring.yml'] if vpn_monitoring | bool else []) }}"
       notify: Restart stack
 
     - name: Write credentials
@@ -117,6 +149,38 @@
         dest: "{{ vpn_deploy_dir }}/.env"
         mode: "0644"
       notify: Restart stack
+
+    - name: Monitoring
+      when: vpn_monitoring | bool
+      block:
+        - name: Copy monitoring configs
+          ansible.builtin.copy:
+            src: "{{ vpn_src_dir }}/{{ item }}"
+            dest: "{{ vpn_deploy_dir }}/{{ item }}"
+            mode: "0644"
+          loop: "{{ vpn_monitoring_files }}"
+          notify: Restart monitoring
+
+        - name: Write Alertmanager config
+          ansible.builtin.template:
+            src: alertmanager.yml.j2
+            dest: "{{ vpn_deploy_dir }}/monitoring/alertmanager.yml"
+            mode: "0644"
+          notify: Restart monitoring
+
+        # 644 inside the 700 secrets/ dir: Grafana (uid 472) and Alertmanager (nobody) read them in the container
+        - name: Write monitoring secrets
+          ansible.builtin.copy:
+            content: "{{ item.content }}"
+            dest: "{{ vpn_deploy_dir }}/secrets/{{ item.file }}"
+            mode: "0644"
+          loop:
+            - { file: grafana-admin.txt, content: "{{ grafana_admin_password }}" }
+            - { file: telegram-bot-token.txt, content: "{{ telegram_bot_token }}" }
+          loop_control:
+            label: "{{ item.file }}"
+          no_log: true
+          notify: Restart monitoring
 
     # Rewritten in place every run; the tunnels read it on (re)connect, no restart needed
     - name: Refresh servers.txt from the PIA client's cache
@@ -156,10 +220,41 @@
       retries: 12
       delay: 10
       changed_when: false
+      check_mode: false  # read-only; in --check it verifies the stack that is running now
 
     - name: Show the VPN IP
       ansible.builtin.debug:
         msg: "{{ inventory_hostname }}: socks5://{{ bind }}:{{ lb_socks_port }} -> {{ vpn_ip.stdout }}"
+
+    - name: Verify monitoring
+      when: vpn_monitoring | bool and not ansible_check_mode
+      block:
+        - name: Wait until Prometheus scrapes every target
+          ansible.builtin.uri:
+            url: http://127.0.0.1:{{ prometheus_port }}/api/v1/targets?state=active
+            return_content: true
+          register: vpn_targets
+          until: >-
+            vpn_targets.json is defined and vpn_targets.json.data.activeTargets | length > 0
+            and vpn_targets.json.data.activeTargets | rejectattr('health', 'eq', 'up') | list | length == 0
+          retries: 12
+          delay: 5
+
+        - name: Wait until Grafana is ready
+          ansible.builtin.uri:
+            url: http://127.0.0.1:{{ grafana_port }}/api/health
+          register: vpn_grafana
+          until: vpn_grafana.status == 200
+          retries: 12
+          delay: 5
+
+        - name: Show monitoring URLs
+          ansible.builtin.debug:
+            msg: >-
+              Grafana http://{{ monitoring_bind }}:{{ grafana_port }} (admin),
+              Prometheus http://{{ monitoring_bind }}:{{ prometheus_port }},
+              Alertmanager http://{{ monitoring_bind }}:{{ alertmanager_port }}
+              ({{ vpn_telegram | ternary('alerts go to Telegram', 'alerts in the UI only') }})
 
   handlers:
     # Only when the stack was already running - a fresh start above already picked up the new files
@@ -168,4 +263,12 @@
       args:
         chdir: "{{ vpn_deploy_dir }}"
       when: vpn_running.stdout != ''
+      register: vpn_restarted
+      changed_when: true
+
+    # A dashboard or alert-rule change must not reconnect the tunnels. Skipped when the whole stack
+    # was (re)started in this run - the containers already read the new files.
+    - name: Restart monitoring
+      ansible.builtin.command: podman restart vpn-prometheus vpn-alertmanager vpn-grafana
+      when: vpn_running.stdout != '' and vpn_restarted is not defined
       changed_when: true

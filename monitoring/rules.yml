@@ -1,0 +1,66 @@
+groups:
+  - name: vpn-recording
+    rules:
+      - record: vpn:tunnel_usable
+        expr: max by (server) (haproxy_server_status{proxy="socks5_pool", state=~"UP|DRAIN|NOLB"})
+      - record: vpn:tunnel_active
+        expr: >-
+          max by (server) (
+            (haproxy_server_weight{proxy="socks5_pool"} > bool 0)
+            * on (instance, job, proxy, server) haproxy_server_status{proxy="socks5_pool", state="UP"}
+          )
+      - record: vpn:tunnel_maint
+        expr: max by (server) (haproxy_server_status{proxy="socks5_pool", state="MAINT"})
+      # 3 = active, 2 = standby, 1 = reconnecting, 0 = down
+      - record: vpn:tunnel_state
+        expr: 2 * vpn:tunnel_usable + vpn:tunnel_active + vpn:tunnel_maint
+
+  - name: vpn-alerts
+    rules:
+      - alert: VPNNoActiveTunnel
+        expr: sum(vpn:tunnel_active) == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: No tunnel is carrying traffic
+          description: Neither vpn1 nor vpn2 is active in HAProxy - the proxy is down for every client.
+
+      - alert: VPNRedundancyLost
+        expr: vpn:tunnel_usable == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.server }} has been unusable for 5 minutes"
+          description: >-
+            Only one tunnel is left: the next failure takes the proxy down.
+            A normal reconnect takes well under a minute. Check: podman logs {{ $labels.server }} | grep watchdog
+
+      # A planned handover happens about once per ROTATE_PERIOD / 2 (~50 min): more than 4 role changes
+      # in 30 min means tunnels keep failing.
+      - alert: VPNRoleFlapping
+        expr: sum(changes(vpn:tunnel_active[30m])) / 2 > 4
+        labels:
+          severity: warning
+        annotations:
+          summary: "Active tunnel changed {{ $value | printf \"%.0f\" }} times in 30 minutes"
+          description: Tunnels keep failing or reconnecting - the public IP changes often. Check the watchdog logs.
+
+      - alert: VPNHealthCheckSlow
+        expr: avg_over_time(haproxy_server_check_duration_seconds{proxy="socks5_pool"}[10m]) > 3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Health checks through {{ $labels.server }} take {{ $value | printf \"%.1f\" }} s"
+          description: The request through the tunnel is close to the 6 s check timeout - the tunnel is slow or lossy.
+
+      - alert: HAProxyMetricsDown
+        expr: up{job="haproxy"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Prometheus cannot scrape HAProxy
+          description: vpn-lb is down or its metrics endpoint (:8405) does not answer - tunnel alerts cannot fire.

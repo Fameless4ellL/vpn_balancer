@@ -1,9 +1,11 @@
-COMPOSE := podman-compose
 -include .env
+# MONITORING=1 in .env adds Prometheus + Alertmanager + Grafana (compose.monitoring.yml)
+MONITORING_ON := $(filter 1,$(MONITORING))
+COMPOSE := podman-compose -f compose.yml $(if $(MONITORING_ON),-f compose.monitoring.yml)
 
 .PHONY: up down restart logs ps ip check regions servers
 
-up: .env servers ovpn/ca.crt
+up: .env servers ovpn/ca.crt $(if $(MONITORING_ON),secrets/grafana-admin.txt secrets/telegram-bot-token.txt)
 	$(COMPOSE) up -d --build
 
 down:
@@ -49,3 +51,12 @@ ovpn/ca.crt:
 		unzip -p /tmp/pia-openvpn.zip ca.rsa.4096.crt > $@; \
 	fi
 	@openssl x509 -in $@ -noout -subject >/dev/null && echo "$@: $$(openssl x509 -in $@ -noout -fingerprint -sha256)"
+
+secrets/grafana-admin.txt:
+	@mkdir -p secrets && chmod 700 secrets
+	@openssl rand -base64 18 | tr -d '\n' > $@ && chmod 644 $@
+	@echo "$@: generated Grafana admin password (user: admin)"
+
+secrets/telegram-bot-token.txt:
+	@mkdir -p secrets && chmod 700 secrets
+	@touch $@ && chmod 644 $@

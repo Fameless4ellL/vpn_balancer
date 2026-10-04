@@ -13,6 +13,15 @@ lb_socks_port: 1081
 lb_http_port: 8888
 lb_stats_port: 8404
 
+# Monitoring: Prometheus + Alertmanager + Grafana next to the stack (compose.monitoring.yml)
+vpn_monitoring: true
+monitoring_bind: 0.0.0.0   # UIs on this machine only; 0.0.0.0 publishes them on the LAN
+grafana_port: 3000
+prometheus_port: 9090
+alertmanager_port: 9093
+# Telegram alerts: your chat id (e.g. from @userinfobot) + the bot token in vault.yml. Empty = UI only.
+telegram_chat_id: 1792255940
+
 # Open the proxy ports in firewalld when the balancer is published on the LAN
 vpn_open_firewall: "{{ bind != '127.0.0.1' }}"
 
@@ -21,3 +30,5 @@ pia_user: "{{ vault_pia_user }}"
 pia_password: "{{ vault_pia_password }}"
 socks_user: "{{ vault_socks_user }}"
 socks_password: "{{ vault_socks_password }}"
+grafana_admin_password: "{{ vault_grafana_admin_password }}"
+telegram_bot_token: "{{ vault_telegram_bot_token | default('') }}"
