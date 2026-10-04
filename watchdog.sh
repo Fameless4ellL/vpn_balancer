@@ -9,9 +9,11 @@
 # - Decides, together with the peer, which tunnel is active (/shared/active). The active tunnel keeps
 #   the role until it goes down or hands it over before a planned reconnect - so traffic doesn't jump
 #   back and forth and the public IP changes only when it has to.
+# - Keeps the tunnels on different PIA servers: one account can't hold two sessions on the same server
+#   If the server is already used by the peer or by the local PIA client, this tunnel moves elsewhere.
 # - Publishes its state for HAProxy's agent-check (/run/agent: "ready up 100%" = active,
 #   "ready up 0%" = standby, "maint" = not usable) and for the peer (/shared/<name>:
-#   "<up|down> <connected-at> <loss%>").
+#   "<up|down> <connected-at> <loss%> <server-cn>").
 set -u
 
 : "${NAME:?}" "${PEER:?}" "${PIA_SLOT:=1}" "${OVPN_PID:?}"
@@ -23,18 +25,23 @@ set -u
 
 log() { echo "$(date -u '+%Y-%m-%d %H:%M:%S') watchdog: $*"; }
 
-agent=maint connected=0 fails=0 samples="" last_switch=0
+agent=maint connected=0 fails=0 samples="" last_switch=0 cn=""
 phase=$(( (PIA_SLOT - 1) * ROTATE_PERIOD / 2 ))
 now=$(date +%s)
 handled=$(( (now - phase) / ROTATE_PERIOD ))   # don't rotate in the slot we started in
 
 publish() {
   printf '%s\n' "$agent" > /run/agent.tmp && mv /run/agent.tmp /run/agent
-  printf '%s %s %s\n' "$1" "$connected" "$loss" > "/shared/$NAME.tmp" && mv "/shared/$NAME.tmp" "/shared/$NAME"
+  printf '%s %s %s %s\n' "$1" "$connected" "$loss" "$cn" > "/shared/$NAME.tmp" && mv "/shared/$NAME.tmp" "/shared/$NAME"
 }
 
 peer_state() { cat "/shared/$PEER" 2>/dev/null || echo "down 0 100"; }
 active() { cat /shared/active 2>/dev/null; }
+client_cn() { awk '/^verify-x509-name/ {print $2; exit}' /run/pia-client/pia.ovpn 2>/dev/null; }
+# servers this tunnel must not use: the peer's (if up) and the local PIA client's
+busy_cns() { set -- $(peer_state); [ "$1" = up ] && echo "${4:-}"; client_cn; }
+# number of region servers other than the busy ones and our own - i.e. somewhere to switch to
+free_servers() { awk -v r="$PIA_REGION" -v ex=" $(busy_cns | tr '\n' ' ') $cn " '$1==r && index(ex, " " $3 " ")==0' /run/servers.txt | wc -l; }
 set_active() { echo "$1" > /shared/active.tmp && mv /shared/active.tmp /shared/active; log "active tunnel -> $1"; }
 
 reconnect() {
@@ -43,8 +50,10 @@ reconnect() {
   if [ "$(active)" = "$NAME" ] && [ "$1" = up ]; then set_active "$PEER"; fi   # hand over first
   agent=maint; publish down
   sleep "$DRAIN"
-  kill -USR1 "$OVPN_PID"
-  connected=0 fails=0 samples=""
+  # regenerate the server list without busy servers, then SIGHUP = reconnect with the re-read config
+  /gen-conf.sh $(busy_cns) >/dev/null
+  kill -HUP "$OVPN_PID"
+  connected=0 fails=0 samples="" cn=""
 }
 
 loss=0
@@ -61,7 +70,14 @@ while kill -0 "$OVPN_PID" 2>/dev/null; do
   fi
   if [ "$connected" -eq 0 ]; then
     connected=$now
-    log "tunnel up (gateway $gw)"
+    cn=$(cat /run/server_cn 2>/dev/null)
+    log "tunnel up on $cn (gateway $gw)"
+    set -- $(peer_state)
+    if [ "$cn" = "$(client_cn)" ]; then
+      reconnect "server $cn is used by the local PIA client (same account)"; continue
+    elif [ "$1" = up ] && [ "${4:-}" = "$cn" ] && [ "$2" -le "$connected" ]; then
+      reconnect "server $cn is already used by $PEER (same account)"; continue
+    fi
   fi
 
   if ping -c1 -W1 -q "$gw" >/dev/null 2>&1; then r=1 fails=0; else r=0 fails=$((fails + 1)); fi
@@ -85,7 +101,11 @@ while kill -0 "$OVPN_PID" 2>/dev/null; do
   if [ ${#samples} -ge "$LOSS_WINDOW" ] && [ "$loss" -gt "$LOSS_MAX" ] \
      && [ $(( now - last_switch )) -ge 300 ] && [ "$peer_up" = up ] && [ "$peer_loss" -lt "$loss" ]; then
     last_switch=$now
-    reconnect "packet loss ${loss}% (peer ${peer_loss}%), switching server"; continue
+    if [ "$(free_servers)" -gt 0 ]; then
+      reconnect "packet loss ${loss}% (peer ${peer_loss}%), switching server"; continue
+    fi
+    log "packet loss ${loss}% on $cn, but no free server in $PIA_REGION to switch to (staying standby)"
+    [ "$(active)" = "$NAME" ] && [ "$peer_up" = up ] && set_active "$PEER"   # let the healthier tunnel carry traffic
   fi
 
   slot=$(( (now - phase) / ROTATE_PERIOD ))

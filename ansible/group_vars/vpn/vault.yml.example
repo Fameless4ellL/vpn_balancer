@@ -1,0 +1,6 @@
+# cp vault.yml.example vault.yml && ansible-vault encrypt vault.yml
+# vault.yml is git-ignored; edit it later with: ansible-vault edit group_vars/vpn/vault.yml
+vault_pia_user: p1234567
+vault_pia_password: PIA_PASSWORD
+vault_socks_user: x1234567
+vault_socks_password: SOCKS_PASSWORD

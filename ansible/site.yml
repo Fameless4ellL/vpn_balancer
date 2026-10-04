@@ -1,0 +1,171 @@
+# Deploys vpn_balancer (rootless Podman) on a self-hosted Linux machine.
+#   ansible-playbook site.yml -K --ask-vault-pass
+- name: Deploy vpn_balancer
+  hosts: vpn
+  # Facts are gathered as the connecting user: the stack runs rootless under this user,
+  # only the host preparation below uses sudo.
+  vars:
+    vpn_src_dir: "{{ playbook_dir }}/.."
+    vpn_runtime_files:
+      - Containerfile
+      - compose.yml
+      - Makefile
+      - entrypoint.sh
+      - watchdog.sh
+      - gen-conf.sh
+      - tls-verify.sh
+      - pia-servers.py
+      - haproxy/haproxy.cfg
+    vpn_xdg_env:
+      XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts.user_uid }}"
+
+  tasks:
+    - name: Host preparation (root)
+      become: true
+      block:
+        - name: Install packages
+          ansible.builtin.package:
+            name: [podman, podman-compose, python3, make, curl, openssl, unzip]
+            state: present
+
+        - name: Load the tun module now and on boot
+          community.general.modprobe:
+            name: tun
+            state: present
+            persistent: present
+
+        - name: Allow containers to use /dev/net/tun (SELinux)
+          ansible.posix.seboolean:
+            name: container_use_devices
+            state: true
+            persistent: true
+          when: ansible_facts.selinux.status == 'enabled'
+
+        - name: Keep user services running without a login session (rootless containers survive logout/reboot)
+          ansible.builtin.command: loginctl enable-linger {{ ansible_facts.user_id }}
+          args:
+            creates: /var/lib/systemd/linger/{{ ansible_facts.user_id }}
+
+        - name: Open proxy ports on the LAN
+          ansible.posix.firewalld:
+            port: "{{ item }}/tcp"
+            permanent: true
+            immediate: true
+            state: enabled
+          loop: ["{{ lb_socks_port }}", "{{ lb_http_port }}"]
+          when: vpn_open_firewall | bool
+
+    - name: Check that the PIA client is installed (servers.txt and the CA certificate come from it)
+      ansible.builtin.stat:
+        path: /opt/piavpn/etc/data.json
+      register: vpn_pia_data
+
+    - name: Fail without the PIA client
+      ansible.builtin.assert:
+        that: vpn_pia_data.stat.exists
+        fail_msg: Install the PIA client (/opt/piavpn) on {{ inventory_hostname }} first; it may stay disconnected.
+
+    - name: Find a running stack
+      ansible.builtin.command: >-
+        podman ps --filter name=^vpn-lb$
+        --format '{{ "{{" }} index .Labels "com.docker.compose.project.working_dir" {{ "}}" }}'
+      register: vpn_running
+      changed_when: false
+      check_mode: false  # read-only; the guard below must work in --check too
+
+    - name: Refuse to start a second stack next to one run from another directory
+      ansible.builtin.assert:
+        that: vpn_running.stdout in ['', vpn_deploy_dir]
+        fail_msg: >-
+          The stack is already running from {{ vpn_running.stdout }}.
+          Stop it there first (make down), then re-run the playbook.
+
+    - name: Create directories
+      ansible.builtin.file:
+        path: "{{ vpn_deploy_dir }}/{{ item.path }}"
+        state: directory
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "", mode: "0755" }
+        - { path: haproxy, mode: "0755" }
+        - { path: secrets, mode: "0700" }
+
+    - name: Copy runtime files
+      ansible.builtin.copy:
+        src: "{{ vpn_src_dir }}/{{ item }}"
+        dest: "{{ vpn_deploy_dir }}/{{ item }}"
+        mode: preserve
+      loop: "{{ vpn_runtime_files }}"
+      notify: Restart stack
+
+    - name: Write credentials
+      ansible.builtin.copy:
+        content: "{{ item.user }}\n{{ item.password }}\n"
+        dest: "{{ vpn_deploy_dir }}/secrets/{{ item.file }}"
+        mode: "0600"
+      loop:
+        - { file: pia-auth.txt, user: "{{ pia_user }}", password: "{{ pia_password }}" }
+        - { file: socks-auth.txt, user: "{{ socks_user }}", password: "{{ socks_password }}" }
+      loop_control:
+        label: "{{ item.file }}"
+      no_log: true
+      notify: Restart stack
+
+    - name: Write .env
+      ansible.builtin.template:
+        src: env.j2
+        dest: "{{ vpn_deploy_dir }}/.env"
+        mode: "0644"
+      notify: Restart stack
+
+    # Rewritten in place every run; the tunnels read it on (re)connect, no restart needed
+    - name: Refresh servers.txt from the PIA client's cache
+      ansible.builtin.command: python3 pia-servers.py
+      args:
+        chdir: "{{ vpn_deploy_dir }}"
+      changed_when: false
+
+    - name: Fetch PIA's CA certificate
+      ansible.builtin.command: make ovpn/ca.crt
+      args:
+        chdir: "{{ vpn_deploy_dir }}"
+        creates: "{{ vpn_deploy_dir }}/ovpn/ca.crt"
+
+    - name: Start the stack
+      ansible.builtin.command: make up
+      args:
+        chdir: "{{ vpn_deploy_dir }}"
+      when: vpn_running.stdout == ''
+      changed_when: true
+
+    - name: Restart containers after reboot (podman's own unit for restart=always containers)
+      ansible.builtin.systemd_service:
+        name: podman-restart.service
+        scope: user
+        enabled: true
+      environment: "{{ vpn_xdg_env }}"
+
+    - name: Apply pending restarts
+      ansible.builtin.meta: flush_handlers
+
+    # curl, not uri: uri has no SOCKS5 proxy support
+    - name: Wait for a public IP through the balancer  # noqa: command-instead-of-module
+      ansible.builtin.command: curl -s -m 15 --socks5-hostname 127.0.0.1:{{ lb_socks_port }} https://ipinfo.io/ip
+      register: vpn_ip
+      until: vpn_ip.rc == 0 and vpn_ip.stdout | length > 0
+      retries: 12
+      delay: 10
+      changed_when: false
+
+    - name: Show the VPN IP
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: socks5://{{ bind }}:{{ lb_socks_port }} -> {{ vpn_ip.stdout }}"
+
+  handlers:
+    # Only when the stack was already running - a fresh start above already picked up the new files
+    - name: Restart stack
+      ansible.builtin.command: make restart
+      args:
+        chdir: "{{ vpn_deploy_dir }}"
+      when: vpn_running.stdout != ''
+      changed_when: true

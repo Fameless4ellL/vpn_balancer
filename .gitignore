@@ -2,3 +2,4 @@ secrets/
 servers.txt
 .env
 ovpn/ca.crt
+ansible/group_vars/vpn/vault.yml

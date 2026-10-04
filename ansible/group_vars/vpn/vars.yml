@@ -1,0 +1,23 @@
+# Where the stack is deployed on the target (a copy of the repo's runtime files, not the repo itself)
+vpn_deploy_dir: "{{ ansible_facts.user_dir }}/.local/share/vpn_balancer"
+
+# .env values (see ../../.env.example)
+vpn1_region: poland
+vpn2_region: poland
+pia_port: 853
+socks_host: 77.247.181.216,109.201.152.162
+socks_port: 1080
+rotate_period: 6000
+bind: 0.0.0.0          # 127.0.0.1 = this machine only, 0.0.0.0 = whole LAN (no auth!)
+lb_socks_port: 1081
+lb_http_port: 8888
+lb_stats_port: 8404
+
+# Open the proxy ports in firewalld when the balancer is published on the LAN
+vpn_open_firewall: "{{ bind != '127.0.0.1' }}"
+
+# Credentials come from the encrypted vault.yml (copy vault.yml.example, then: ansible-vault encrypt)
+pia_user: "{{ vault_pia_user }}"
+pia_password: "{{ vault_pia_password }}"
+socks_user: "{{ vault_socks_user }}"
+socks_password: "{{ vault_socks_password }}"

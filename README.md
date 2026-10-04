@@ -45,6 +45,9 @@ applications ──→ 127.0.0.1:1081 (SOCKS5) / :8888 (HTTP)
   - planned reconnect every `ROTATE_PERIOD` (100 min), before the proxy's ~2 h session limit.
     The tunnels are scheduled half a period apart, and the active one hands its role to the other
     before reconnecting, so new connections never see an outage.
+  - keeps the tunnels on **different PIA servers**, and off the server of the local PIA client:
+    one account can't hold two sessions on the same server (the newer session takes over the tunnel
+    IP and the older one dies — they would keep kicking each other).
 
   The two watchdogs agree on which tunnel is **active** (a shared volume). The role moves only when
   the active tunnel fails or is about to reconnect — traffic does not jump back afterwards, so the
@@ -162,6 +165,7 @@ so the PIA client can be either connected or disconnected. Recommendations:
 | tunnel never comes up, no `Peer Connection Initiated` | proxy reachability: `curl --socks5 USER:PASS@proxy-nl.privateinternetaccess.com:1080 https://ipinfo.io/ip` |
 | `permission denied` on `/dev/net/tun` | `sudo setsebool -P container_use_devices=true` |
 | both tunnels drop at the same time | check that `SOCKS_HOST` gives each tunnel a different proxy (`podman logs vpn1 \| grep socks5`); don't run extra tunnels on the same account |
+| tunnels keep reconnecting every ~30 s | two sessions of one PIA account on the same server. The watchdog avoids this; check `podman logs vpnN \| grep watchdog` and that the region has enough servers (PIA has ~3 per region; the PIA client uses one) |
 | reconnects every ~2 h | expected: PIA's proxy limits a session to ~2 h (the PIA client reconnects too). The watchdog does it earlier, one tunnel at a time |
 
 ## Limitations

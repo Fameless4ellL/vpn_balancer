@@ -10,6 +10,7 @@ x-vpn: &vpn
     - ./secrets/socks-auth.txt:/run/secrets/socks-auth.txt:ro,z
     - ./servers.txt:/run/servers.txt:ro,z
     - vpnstate:/shared:z
+    - /opt/piavpn/var:/run/pia-client:ro
 
 services:
   vpn1:

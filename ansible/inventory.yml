@@ -1,0 +1,9 @@
+# Hosts that run the VPN balancer. Self-hosted: this machine, or any Linux box on the LAN reachable over SSH.
+vpn:
+  hosts:
+    localhost:
+      ansible_connection: local
+    # Another machine at home (mini-PC, Raspberry Pi, old laptop) - over SSH with your key:
+    # homeserver:
+    #   ansible_host: 192.168.1.50
+    #   ansible_user: zaur

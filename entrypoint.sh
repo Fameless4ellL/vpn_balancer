@@ -6,12 +6,6 @@ set -eu
 
 : "${PIA_REGION:?}" "${PIA_SLOT:=1}" "${PIA_PORT:=853}" "${SOCKS_HOST:?}" "${SOCKS_PORT:=1080}" "${PIA_DNS:=10.0.0.243}"
 
-# Region server IPs come from servers.txt (make servers), no DNS needed. The list is rotated by PIA_SLOT
-# so tunnels in the same region start on different servers.
-PIA_IPS=$(awk -v r="$PIA_REGION" '$1==r {print $2}' /run/servers.txt)
-N=$(echo "$PIA_IPS" | grep -c .) || true
-[ "$N" -gt 0 ] || { echo "no servers for region '$PIA_REGION' in servers.txt" >&2; exit 1; }
-PIA_IPS=$(echo "$PIA_IPS" | awk -v k=$(( (PIA_SLOT - 1) % N )) -v n="$N" '{a[NR-1]=$0} END {for (i=0;i<n;i++) print a[(i+k)%n]}')
 # SOCKS_HOST may list several proxies (IPs or hostnames, space/comma separated); tunnel N takes the
 # N-th address, so tunnels don't share one proxy - a proxy failure or session reset hits only one of them.
 SOCKS_IPS=$(for h in $(echo "$SOCKS_HOST" | tr ',' ' '); do getent ahostsv4 "$h" | awk '{print $1}' | sort -u; done | awk '!seen[$0]++')
@@ -29,42 +23,11 @@ dnsmasq --no-resolv --no-hosts --server="$PIA_DNS" --listen-address=127.0.0.1 --
   --cache-size=10000 --min-cache-ttl=300 --user=root
 printf 'nameserver 127.0.0.1\noptions timeout:1 attempts:3\n' > /etc/resolv.conf
 
-{
-  cat <<EOF
-client
-dev tun0
-proto udp
-EOF
-  for ip in $PIA_IPS; do echo "remote $ip $PIA_PORT"; done
-  cat <<EOF
-nobind
-persist-key
-socks-proxy $SOCKS_IP $SOCKS_PORT /run/secrets/socks-auth.txt
-auth-user-pass /run/secrets/pia-auth.txt
-auth-nocache
-ca /etc/openvpn/ca.crt
-remote-cert-tls server
-tls-client
-data-ciphers AES-256-GCM
-disable-dco
-redirect-gateway def1
-pull-filter ignore "dhcp-option DNS "
-pull-filter ignore "route-ipv6"
-pull-filter ignore "ifconfig-ipv6"
-# Own timers, like the PIA client (the server pushes ping-restart 60 - a dead tunnel would hang for a minute)
-pull-filter ignore "ping "
-pull-filter ignore "ping-restart "
-ping 5
-ping-restart 30
-connect-timeout 30
-server-poll-timeout 20
-sndbuf 262144
-rcvbuf 262144
-verb 3
-EOF
-} > /etc/openvpn/pia.conf
-
-echo "PIA $PIA_REGION servers (in order): $(echo $PIA_IPS) port $PIA_PORT via socks5 $SOCKS_IP:$SOCKS_PORT"
+# openvpn config (server list, proxy, options). The watchdog re-runs it to move off a busy server.
+export PIA_REGION PIA_SLOT PIA_PORT SOCKS_IP SOCKS_PORT
+peer_cn=$(awk '$1=="up" {print $4}' "/shared/${PEER:-none}" 2>/dev/null || true)
+client_cn=$(awk '/^verify-x509-name/ {print $2; exit}' /run/pia-client/pia.ovpn 2>/dev/null || true)
+/gen-conf.sh $peer_cn $client_cn
 gost -L "http://:8888" -L "socks5://:1080" &
 
 # HAProxy agent-check: replies with the watchdog's verdict ("ready up" / "maint")
