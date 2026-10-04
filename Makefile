@@ -8,8 +8,10 @@ COMPOSE := podman-compose -f compose.yml $(if $(MONITORING_ON),-f compose.monito
 up: .env servers ovpn/ca.crt $(if $(MONITORING_ON),secrets/grafana-admin.txt secrets/telegram-bot-token.txt)
 	$(COMPOSE) up -d --build
 
+# --remove-orphans: after MONITORING=1 -> 0, also stop the monitoring containers (compose.monitoring.yml
+# is no longer passed, so a plain down would leave them running)
 down:
-	$(COMPOSE) down
+	$(COMPOSE) down --remove-orphans
 
 restart: down up
 
