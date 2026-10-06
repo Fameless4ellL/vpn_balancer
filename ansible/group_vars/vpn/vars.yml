@@ -11,6 +11,7 @@ rotate_period: 6000
 bind: 0.0.0.0          # 127.0.0.1 = this machine only, 0.0.0.0 = whole LAN (no auth!)
 lb_socks_port: 1081
 lb_http_port: 8888
+wg_port: 51820       # WireGuard entry (vpn-gw), UDP
 lb_stats_port: 8404
 
 # Monitoring: Prometheus + Alertmanager + Grafana next to the stack (compose.monitoring.yml)

@@ -69,6 +69,14 @@
           loop: ["{{ lb_socks_port }}", "{{ lb_http_port }}"]
           when: vpn_open_firewall | bool
 
+        - name: Open the WireGuard port on the LAN
+          ansible.posix.firewalld:
+            port: "{{ wg_port }}/udp"
+            permanent: true
+            immediate: true
+            state: enabled
+          when: vpn_open_firewall | bool
+
         - name: Open monitoring ports on the LAN
           ansible.posix.firewalld:
             port: "{{ item }}/tcp"

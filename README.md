@@ -27,7 +27,7 @@ applications ──→ 127.0.0.1:1081 (SOCKS5) / :8888 (HTTP)
                  HAProxy (vpn-lb) — health checks + agent checks, all traffic to the active tunnel
                 ┌─────────┴─────────┐
           vpn1 (active)       vpn2 (standby)            ← roles swap on failure / planned reconnect
-          openvpn + gost      openvpn + gost
+          openvpn + sing-box  openvpn + sing-box
           + watchdog          + watchdog
                 │                   │
           SOCKS5 proxy A      SOCKS5 proxy B            ← different PIA multi-hop proxies
@@ -36,7 +36,7 @@ applications ──→ 127.0.0.1:1081 (SOCKS5) / :8888 (HTTP)
 ```
 
 - **vpn1 / vpn2** (`Containerfile`, `entrypoint.sh`) — Alpine + OpenVPN 2.6 +
-  [gost](https://github.com/go-gost/gost) (HTTP/SOCKS5 server for clients) + dnsmasq (DNS cache).
+  [sing-box](https://sing-box.sagernet.org/) (SOCKS5/HTTP server for clients) + dnsmasq (DNS cache).
   Each container has a kill switch: only the SOCKS5 proxy is reachable directly, everything else
   goes through `tun0` only. DNS is resolved by PIA's DNS inside the tunnel.
 - **watchdog** (`watchdog.sh`, in each tunnel container) — pings the VPN gateway every second:
@@ -80,9 +80,9 @@ applications ──→ 127.0.0.1:1081 (SOCKS5) / :8888 (HTTP)
 
 | | Idle | Under load |
 |---|---|---|
-| RAM | ~100 MB total (vpn1/vpn2 ~25 MB each, HAProxy ~50 MB) | barely changes |
+| RAM | ~100 MB total (vpn1/vpn2 ~21 MB each, HAProxy ~50 MB) | barely changes |
 | CPU | < 1% | not measured reliably (see note below) |
-| Disk | ~110 MB of images (`pia-tunnel` 67 MB, `haproxy` 39 MB) | — |
+| Disk | ~150 MB of images (`pia-tunnel` 111 MB, `haproxy` 39 MB) | — |
 
 Any machine that runs Podman is enough, including a Raspberry Pi or a small VPS.
 
@@ -121,6 +121,35 @@ Any machine that runs Podman is enough, including a Raspberry Pi or a small VPS.
 4. Point your applications at `socks5://127.0.0.1:1081` (prefer `socks5h` so DNS goes through the
    VPN) or `http://127.0.0.1:8888`. HAProxy stats: <http://127.0.0.1:8404>.
 
+### UDP and whole devices: WireGuard (Discord voice, games)
+
+The SOCKS5 and HTTP proxies carry TCP only: HAProxy works in TCP mode, and apps like Discord send
+voice over UDP directly, past the proxy. For UDP and whole devices there is the **vpn-gw** container
+(`gw.sh`): a WireGuard server (sing-box, userspace — no kernel module or root) that sends each
+connection, TCP and **native UDP**, over SOCKS5 straight to the active tunnel, bypassing HAProxy. It
+follows the watchdogs' choice of the active tunnel (`/shared/active`) within ~1 s; existing connections
+are closed on a switch and reopen through the new tunnel. There is no direct outbound, so client
+traffic never leaves unencrypted.
+
+```sh
+make wg-peer N=1     # client 1: creates keys, prints the config + QR code (restarts vpn-gw)
+```
+
+Import the config into the official WireGuard app (Windows/macOS/Linux/Android/iOS). All internet
+traffic of the device goes through the VPN; private/LAN ranges stay direct, so SSH, printers and the
+router keep working (`WG_ALLOWED="0.0.0.0/0, ::/0" make wg-peer N=…` for a full tunnel). DNS queries (to any server, port 53) are answered by the active tunnel's
+dnsmasq cache, which forwards to PIA's DNS through the tunnel: a repeated lookup takes ~2 ms instead of ~100 ms.
+**Per-app split (browser outside the VPN):** the WireGuard app splits by IP only. `make wg-singbox N=1`
+writes `secrets/wg/peer-N.singbox.json`, a [sing-box](https://sing-box.sagernet.org/) client config for
+the same client: TUN captures the device, browsers (`WG_DIRECT_APPS`, comma-separated process names)
+and the LAN go direct, everything else — Discord included — through the WireGuard entry. Run it on the
+client as admin/root: `sing-box run -c peer-1.singbox.json`, instead of (not together with) the WireGuard app.
+
+Client N gets `10.13.13.(N+1)`;
+the endpoint is `WG_ENDPOINT` from `.env` or this machine's LAN address, port `WG_PORT` (51820/udp,
+needs `BIND=0.0.0.0`). Keys live in `secrets/wg/`; delete `peer-N.*` and run `podman restart vpn-gw`
+to revoke a client.
+
 ### Commands
 
 | Command | What it does |
@@ -134,6 +163,8 @@ Any machine that runs Podman is enough, including a Raspberry Pi or a small VPS.
 | `make check` | tunnel state in the balancer |
 | `make regions` | PIA regions with OpenVPN UDP, sorted by latency |
 | `make servers` | refresh `servers.txt` from the PIA client's cache |
+| `make wg-peer N=1` | create / show WireGuard client N (config + QR) |
+| `make wg-singbox N=1` | sing-box config for client N: browsers direct, the rest via WireGuard |
 | `make ovpn/ca.crt` | fetch PIA's public CA certificate (done automatically by `make up`) |
 
 ### Testing failover
@@ -200,4 +231,4 @@ so the PIA client can be either connected or disconnected. Recommendations:
 ## License
 
 [MIT](LICENSE). Third-party components are under their own licenses: OpenVPN (GPLv2), HAProxy
-(GPLv2), gost (MIT), dnsmasq (GPLv2), Alpine Linux; `ovpn/ca.crt` (PIA's public CA certificate) is not included and is fetched by `make up`.
+(GPLv2), sing-box (GPLv3), dnsmasq (GPLv2), Alpine Linux; `ovpn/ca.crt` (PIA's public CA certificate) is not included and is fetched by `make up`.

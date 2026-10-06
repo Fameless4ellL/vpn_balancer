@@ -3,9 +3,9 @@
 MONITORING_ON := $(filter 1,$(MONITORING))
 COMPOSE := podman-compose -f compose.yml $(if $(MONITORING_ON),-f compose.monitoring.yml)
 
-.PHONY: up down restart logs ps ip check regions servers
+.PHONY: up down restart logs ps ip check regions servers wg-peer wg-singbox
 
-up: .env servers ovpn/ca.crt $(if $(MONITORING_ON),secrets/grafana-admin.txt secrets/telegram-bot-token.txt)
+up: .env servers ovpn/ca.crt secrets/wg $(if $(MONITORING_ON),secrets/grafana-admin.txt secrets/telegram-bot-token.txt)
 	$(COMPOSE) up -d --build
 
 # --remove-orphans: after MONITORING=1 -> 0, also stop the monitoring containers (compose.monitoring.yml
@@ -62,3 +62,27 @@ secrets/grafana-admin.txt:
 secrets/telegram-bot-token.txt:
 	@mkdir -p secrets && chmod 700 secrets
 	@touch $@ && chmod 644 $@
+
+
+secrets/wg:
+	@mkdir -p $@ && chmod 700 secrets $@
+
+# WireGuard client N (1, 2, ...): creates its keys if missing, prints the config and a QR code.
+# Endpoint = WG_ENDPOINT from .env, or this machine's LAN address.
+WG_ENDPOINT ?= $(shell ip -4 route show default | awk '{for (i=1;i<NF;i++) if ($$i=="src") {print $$(i+1); exit}}')
+wg-peer: secrets/wg
+	@test -n "$(N)" || { echo "usage: make wg-peer N=1" >&2; false; }
+	@podman run --rm -v ./secrets/wg:/run/secrets/wg:z -e WG_ENDPOINT=$(WG_ENDPOINT) -e WG_PORT=$(or $(WG_PORT),51820) $(if $(WG_ALLOWED),-e "WG_ALLOWED=$(WG_ALLOWED)") \
+		--entrypoint /gw.sh localhost/pia-tunnel:latest peer $(N)
+	@! podman container exists vpn-gw || podman restart vpn-gw >/dev/null
+
+# sing-box client config for client N (TUN; browsers and LAN direct, the rest via WireGuard).
+# Saved to secrets/wg/peer-N.singbox.json; WG_DIRECT_APPS="a.exe, b" overrides the direct programs.
+wg-singbox: secrets/wg
+	@test -n "$(N)" || { echo "usage: make wg-singbox N=1" >&2; false; }
+	@podman run --rm -v ./secrets/wg:/run/secrets/wg:z -e WG_ENDPOINT=$(WG_ENDPOINT) -e WG_PORT=$(or $(WG_PORT),51820) \
+		$(if $(WG_DIRECT_APPS),-e "WG_DIRECT_APPS=$(WG_DIRECT_APPS)") \
+		--entrypoint /gw.sh localhost/pia-tunnel:latest singbox $(N) > secrets/wg/peer-$(N).singbox.json
+	@podman run --rm -v ./secrets/wg/peer-$(N).singbox.json:/c.json:ro,z --entrypoint sing-box localhost/pia-tunnel:latest check -c /c.json
+	@echo "secrets/wg/peer-$(N).singbox.json: copy it to the client and run: sing-box run -c peer-$(N).singbox.json (as admin/root)"
+	@! podman container exists vpn-gw || podman restart vpn-gw >/dev/null

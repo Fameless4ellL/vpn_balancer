@@ -1,5 +1,5 @@
 #!/bin/sh
-# Brings up openvpn to PIA through the SOCKS5 proxy (like Multi-Hop in the PIA GUI) and gost on top of the tunnel.
+# Brings up openvpn to PIA through the SOCKS5 proxy (like Multi-Hop in the PIA GUI) and sing-box (SOCKS5/HTTP) on top of the tunnel.
 # Kill switch: only the SOCKS5 proxy is reachable directly (eth0); everything else goes through tun0 only,
 # otherwise ENETUNREACH. A dead tunnel does not leak - it fails the health check instead.
 set -eu
@@ -28,7 +28,20 @@ export PIA_REGION PIA_SLOT PIA_PORT SOCKS_IP SOCKS_PORT
 peer_cn=$(awk '$1=="up" {print $4}' "/shared/${PEER:-none}" 2>/dev/null || true)
 client_cn=$(awk '/^verify-x509-name/ {print $2; exit}' /run/pia-client/pia.ovpn 2>/dev/null || true)
 /gen-conf.sh $peer_cn $client_cn
-gost -L "http://:8888" -L "socks5://:1080" &
+# Client-facing proxies (sing-box): SOCKS5 :1080 (also UDP - used by vpn-gw), HTTP :8888
+cat > /etc/sing-box.json <<JSON
+{
+  "log": { "level": "warn" },
+  "inbounds": [
+    { "type": "socks", "listen": "::", "listen_port": 1080 },
+    { "type": "http", "listen": "::", "listen_port": 8888 }
+  ],
+  "outbounds": [{ "type": "direct" }]
+}
+JSON
+sing-box check -c /etc/sing-box.json
+# awk: sing-box's network monitor complains every second about the "unreachable default" route (harmless)
+sing-box run -c /etc/sing-box.json 2>&1 | awk '!/check interface/ { print; fflush() }' &
 
 # HAProxy agent-check: replies with the watchdog's verdict ("ready up" / "maint")
 echo maint > /run/agent

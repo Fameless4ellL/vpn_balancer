@@ -53,5 +53,21 @@ services:
       - "${BIND}:${LB_HTTP_PORT}:8888"
       - "127.0.0.1:${LB_STATS_PORT}:8404"
 
+  # WireGuard entry for whole devices, UDP included (gw.sh); goes to the active tunnel, not via HAProxy
+  gw:
+    image: localhost/pia-tunnel:latest
+    container_name: vpn-gw
+    restart: always
+    depends_on: [vpn1, vpn2]
+    entrypoint: ["/gw.sh"]
+    healthcheck: { disable: true }
+    environment:
+      WG_PORT: ${WG_PORT:-51820}
+    volumes:
+      - ./secrets/wg:/run/secrets/wg:z
+      - vpnstate:/shared:z
+    ports:
+      - "${BIND}:${WG_PORT:-51820}:${WG_PORT:-51820}/udp"
+
 volumes:
   vpnstate:
