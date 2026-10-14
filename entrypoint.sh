@@ -24,7 +24,9 @@ dnsmasq --no-resolv --no-hosts --server="$PIA_DNS" --listen-address=127.0.0.1 --
 printf 'nameserver 127.0.0.1\noptions timeout:1 attempts:3\n' > /etc/resolv.conf
 
 # openvpn config (server list, proxy, options). The watchdog re-runs it to move off a busy server.
-export PIA_REGION PIA_SLOT PIA_PORT SOCKS_IP SOCKS_PORT
+# SOCKS_ALL/ETH_GW: the watchdog moves to another proxy if this one stays unusable
+SOCKS_ALL=$(echo $SOCKS_IPS) ETH_GW=$GW
+export PIA_REGION PIA_SLOT PIA_PORT SOCKS_IP SOCKS_PORT SOCKS_ALL ETH_GW
 peer_cn=$(awk '$1=="up" {print $4}' "/shared/${PEER:-none}" 2>/dev/null || true)
 client_cn=$(awk '/^verify-x509-name/ {print $2; exit}' /run/pia-client/pia.ovpn 2>/dev/null || true)
 /gen-conf.sh $peer_cn $client_cn
@@ -45,7 +47,8 @@ sing-box run -c /etc/sing-box.json 2>&1 | awk '!/check interface/ { print; fflus
 
 # HAProxy agent-check: replies with the watchdog's verdict ("ready up" / "maint")
 echo maint > /run/agent
-socat TCP-LISTEN:9999,fork,reuseaddr SYSTEM:'cat /run/agent' &
+# stderr dropped: HAProxy closes each check connection early -> one \"Connection reset\" line per second
+socat TCP-LISTEN:9999,fork,reuseaddr SYSTEM:'cat /run/agent' 2>/dev/null &
 
 openvpn --config /etc/openvpn/pia.conf &
 OVPN_PID=$!

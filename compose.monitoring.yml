@@ -24,7 +24,8 @@ services:
       - --config.file=/etc/alertmanager/alertmanager.yml
       - --storage.path=/alertmanager
     volumes:
-      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro,z
+      # ALERTMANAGER_CONFIG: set by the Makefile to secrets/alertmanager.yml when Telegram is configured
+      - ${ALERTMANAGER_CONFIG:-./monitoring/alertmanager.yml}:/etc/alertmanager/alertmanager.yml:ro,z
       - ./secrets/telegram-bot-token.txt:/etc/alertmanager/telegram-bot-token:ro,z
       - alertmanager-data:/alertmanager
     ports:

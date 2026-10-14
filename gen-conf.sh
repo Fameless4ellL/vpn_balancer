@@ -5,10 +5,20 @@
 # server of the region is excluded, all of them are used anyway.
 set -eu
 
+# Current server list -> /run/servers.live ("region ip cn"): from the PIA client's cache, which it keeps
+# refreshing (PIA rotates servers and IPs), else the servers.txt snapshot taken at make up
+S=/run/servers.live
+if [ -r /run/pia-etc/data.json ] && jq -r '.cachedModernRegionsList.regions[] | select(.offline | not) | .id as $r
+     | (.servers.ovpnudp // [])[] | "\($r) \(.ip) \(.cn)"' /run/pia-etc/data.json > "$S.tmp" 2>/dev/null && [ -s "$S.tmp" ]; then
+  mv "$S.tmp" "$S"
+elif [ ! -s "$S" ]; then
+  cp /run/servers.txt "$S"
+fi
+
 # region servers "ip cn", rotated by PIA_SLOT so tunnels in the same region start on different servers
-all=$(awk -v r="$PIA_REGION" '$1==r {print $2, $3}' /run/servers.txt)
+all=$(awk -v r="$PIA_REGION" '$1==r {print $2, $3}' "$S")
 n=$(echo "$all" | grep -c .) || true
-[ "$n" -gt 0 ] || { echo "no servers for region '$PIA_REGION' in servers.txt" >&2; exit 1; }
+[ "$n" -gt 0 ] || { echo "no servers for region '$PIA_REGION' in $S" >&2; exit 1; }
 all=$(echo "$all" | awk -v k=$(( (PIA_SLOT - 1) % n )) -v n="$n" '{a[NR-1]=$0} END {for (i=0;i<n;i++) print a[(i+k)%n]}')
 
 use=$(echo "$all" | awk -v ex=" $* " 'index(ex, " " $2 " ") == 0')
@@ -26,7 +36,8 @@ nobind
 persist-key
 socks-proxy $SOCKS_IP $SOCKS_PORT /run/secrets/socks-auth.txt
 auth-user-pass /run/secrets/pia-auth.txt
-auth-nocache
+# no auth-nocache: the hourly TLS renegotiation needs the password again (else AUTH_FAILED, exit)
+auth-retry nointeract
 ca /etc/openvpn/ca.crt
 remote-cert-tls server
 tls-client
@@ -46,6 +57,8 @@ ping 5
 ping-restart 30
 connect-timeout 30
 server-poll-timeout 20
+# retry every 2..10 s (default backoff grows to 300 s - a tunnel could stay down for 5 min after a blip)
+connect-retry 2 10
 sndbuf 262144
 rcvbuf 262144
 verb 3

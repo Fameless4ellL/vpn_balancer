@@ -14,6 +14,7 @@
       - watchdog.sh
       - gen-conf.sh
       - tls-verify.sh
+      - gw.sh
       - pia-servers.py
       - haproxy/haproxy.cfg
     # Changes here restart only the monitoring containers, not the tunnels.
@@ -148,6 +149,23 @@
         - { file: socks-auth.txt, user: "{{ socks_user }}", password: "{{ socks_password }}" }
       loop_control:
         label: "{{ item.file }}"
+      no_log: true
+      notify: Restart stack
+
+    # WireGuard keys from this repo (secrets/wg), if any: existing client configs keep working.
+    # Without them the gateway generates new keys on first start (make wg-peer N=1 on the target).
+    - name: Create the WireGuard keys directory
+      ansible.builtin.file:
+        path: "{{ vpn_deploy_dir }}/secrets/wg"
+        state: directory
+        mode: "0700"
+
+    - name: Copy WireGuard keys
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ vpn_deploy_dir }}/secrets/wg/"
+        mode: "0600"
+      with_fileglob: ["{{ vpn_src_dir }}/secrets/wg/*"]
       no_log: true
       notify: Restart stack
 

@@ -3,7 +3,7 @@
 FROM ghcr.io/sagernet/sing-box:latest AS singbox
 
 FROM docker.io/library/alpine:3.22
-RUN apk add --no-cache openvpn iproute2 curl dnsmasq socat libqrencode-tools
+RUN apk add --no-cache openvpn iproute2 curl dnsmasq socat libqrencode-tools jq
 COPY --from=singbox /usr/local/bin/sing-box /usr/local/bin/sing-box
 COPY ovpn/ca.crt /etc/openvpn/ca.crt
 COPY entrypoint.sh watchdog.sh gen-conf.sh tls-verify.sh gw.sh /

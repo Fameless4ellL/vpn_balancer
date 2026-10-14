@@ -117,7 +117,7 @@ cat > /etc/sing-box.json <<JSON
     ]
   }],
   "outbounds": [
-    { "type": "selector", "tag": "tunnel", "outbounds": ["vpn1", "vpn2"], "interrupt_exist_connections": true },
+    { "type": "selector", "tag": "tunnel", "outbounds": ["vpn1", "vpn2"], "interrupt_exist_connections": false },
     { "type": "socks", "tag": "vpn1", "server": "vpn1", "server_port": 1080 },
     { "type": "socks", "tag": "vpn2", "server": "vpn2", "server_port": 1080 }
   ],
@@ -135,15 +135,33 @@ sing-box run -c /etc/sing-box.json &
 PID=$!
 trap 'kill -TERM "$PID" 2>/dev/null' TERM INT
 
-# Follow the watchdogs' choice of the active tunnel
-cur=
+API=http://127.0.0.1:9090
+log() { echo "$(date -u '+%Y-%m-%d %H:%M:%S') vpn-gw: $*"; }
+# Close the connections running through tunnel $1 (it went down: they would only hang until timeouts)
+close_tunnel() {
+  ids=$(curl -sf -m 2 "$API/connections" | jq -r --arg t "$1" '.connections[]? | select(.chains | index($t)) | .id')
+  [ -n "$ids" ] || return 0
+  for id in $ids; do curl -sf -m 2 -X DELETE "$API/connections/$id"; done
+  log "closed $(echo "$ids" | wc -w) connection(s) of $1 (tunnel down)"
+}
+
+# Follow the watchdogs' choice of the active tunnel. On a switch, open connections stay on the old
+# tunnel (it may be draining before a planned reconnect); they are closed only when it goes down.
+cur= st_vpn1= st_vpn2=
 while kill -0 "$PID" 2>/dev/null; do
   a=$(cat /shared/active 2>/dev/null || true)
   if [ -n "$a" ] && [ "$a" != "$cur" ] \
-     && curl -sf -m 2 -X PUT -d "{\"name\":\"$a\"}" http://127.0.0.1:9090/proxies/tunnel; then
-    echo "$(date -u '+%Y-%m-%d %H:%M:%S') vpn-gw: active tunnel -> $a"
+     && curl -sf -m 2 -X PUT -d "{\"name\":\"$a\"}" "$API/proxies/tunnel"; then
+    log "active tunnel -> $a"
     cur=$a
   fi
+  for t in vpn1 vpn2; do
+    s=$(awk '{print $1; exit}' "/shared/$t" 2>/dev/null || true)
+    eval "prev=\$st_$t"
+    [ "$s" = down ] && [ "$prev" != down ] && [ "$t" != "$cur" ] && close_tunnel "$t"
+    [ "$t" = "$cur" ] && [ "$s" = down ] && s=active-down   # retry the close once it is no longer active
+    eval "st_$t=\$s"
+  done
   sleep 1
 done
 wait "$PID"

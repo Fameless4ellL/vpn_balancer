@@ -11,6 +11,8 @@ x-vpn: &vpn
     - ./servers.txt:/run/servers.txt:ro,z
     - vpnstate:/shared:z
     - /opt/piavpn/var:/run/pia-client:ro
+    # data.json: the PIA client's current server list (account.json there is root-only, unreadable here)
+    - /opt/piavpn/etc:/run/pia-etc:ro
 
 services:
   vpn1:

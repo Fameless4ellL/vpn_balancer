@@ -1,11 +1,14 @@
 -include .env
 # MONITORING=1 in .env adds Prometheus + Alertmanager + Grafana (compose.monitoring.yml)
 MONITORING_ON := $(filter 1,$(MONITORING))
+# Telegram alerts: TELEGRAM_CHAT_ID in .env + the bot token in secrets/telegram-bot-token.txt
+TELEGRAM_ON := $(and $(MONITORING_ON),$(TELEGRAM_CHAT_ID),$(shell test -s secrets/telegram-bot-token.txt && echo 1))
+export ALERTMANAGER_CONFIG := $(if $(TELEGRAM_ON),./secrets/alertmanager.yml,./monitoring/alertmanager.yml)
 COMPOSE := podman-compose -f compose.yml $(if $(MONITORING_ON),-f compose.monitoring.yml)
 
-.PHONY: up down restart logs ps ip check regions servers wg-peer wg-singbox
+.PHONY: up down restart logs ps ip check regions servers wg-peer wg-singbox test-alert
 
-up: .env servers ovpn/ca.crt secrets/wg $(if $(MONITORING_ON),secrets/grafana-admin.txt secrets/telegram-bot-token.txt)
+up: .env servers ovpn/ca.crt secrets/wg $(if $(MONITORING_ON),secrets/grafana-admin.txt secrets/telegram-bot-token.txt) $(if $(TELEGRAM_ON),secrets/alertmanager.yml)
 	$(COMPOSE) up -d --build
 
 # --remove-orphans: after MONITORING=1 -> 0, also stop the monitoring containers (compose.monitoring.yml
@@ -37,7 +40,7 @@ check:
 
 # PIA regions with OpenVPN UDP, sorted by latency (from the PIA client's data)
 regions:
-	@python3 -c 'import json;d=json.load(open("/opt/piavpn/etc/data.json"));L=d["cachedModernRegionsList"]["regions"];lat=d["modernLatencies"];[print(f"{r[\"id\"]:25} {int(lat.get(r[\"id\"],0)):4}ms  {r[\"name\"]}") for r in sorted(L,key=lambda r:lat.get(r["id"],9e9)) if not r.get("offline") and r["servers"].get("ovpnudp")]' | head -30
+	@python3 -c 'import json;d=json.load(open("/opt/piavpn/etc/data.json"));L=d["cachedModernRegionsList"]["regions"];lat=d["modernLatencies"];[print("%-25s %4dms %2d servers  %s" % (r["id"], lat.get(r["id"],0), len(r["servers"]["ovpnudp"]), r["name"])) for r in sorted(L,key=lambda r:lat.get(r["id"],9e9)) if not r.get("offline") and r["servers"].get("ovpnudp")]' | head -30
 
 .env:
 	cp .env.example .env
@@ -86,3 +89,17 @@ wg-singbox: secrets/wg
 	@podman run --rm -v ./secrets/wg/peer-$(N).singbox.json:/c.json:ro,z --entrypoint sing-box localhost/pia-tunnel:latest check -c /c.json
 	@echo "secrets/wg/peer-$(N).singbox.json: copy it to the client and run: sing-box run -c peer-$(N).singbox.json (as admin/root)"
 	@! podman container exists vpn-gw || podman restart vpn-gw >/dev/null
+
+# Alertmanager config with the Telegram receiver (same as the Ansible template)
+secrets/alertmanager.yml: .env secrets/telegram-bot-token.txt
+	@printf '%s\n' 'route:' '  receiver: telegram' '  group_by: [alertname]' '  group_wait: 30s' \
+		'  group_interval: 5m' '  repeat_interval: 4h' 'receivers:' '  - name: telegram' '    telegram_configs:' \
+		'      - bot_token_file: /etc/alertmanager/telegram-bot-token' '        chat_id: $(TELEGRAM_CHAT_ID)' \
+		'        send_resolved: true' > $@ && chmod 644 $@
+	@echo "$@: alerts go to Telegram chat $(TELEGRAM_CHAT_ID)"
+
+# Send a test alert through Alertmanager (resolves itself in 2 minutes)
+test-alert:
+	@curl -sf -XPOST -H 'Content-Type: application/json' http://127.0.0.1:$(or $(ALERTMANAGER_PORT),9093)/api/v2/alerts \
+		-d '[{"labels":{"alertname":"VPNTestAlert","severity":"info"},"annotations":{"summary":"Test alert from vpn_balancer"},"endsAt":"'$$(date -u -d '+2 min' +%FT%TZ)'"}]' \
+		&& echo "test alert sent - expect a Telegram message in ~30 s" || echo "Alertmanager is not reachable"
