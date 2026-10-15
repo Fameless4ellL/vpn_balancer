@@ -81,15 +81,21 @@ while kill -0 "$OVPN_PID" 2>/dev/null; do
     if [ $(( now - down_since )) -ge "$STUCK_AFTER" ]; then
       # Stuck (dead server or proxy; openvpn alone would keep retrying the same ones): next proxy
       # from SOCKS_HOST, fresh server list without busy servers, and a reconnect right away
+      # If the proxy itself answers, the servers openvpn tried did not: avoid them for BAD_TTL.
+      # If it does not (proxy or the whole internet down), the servers are not to blame.
+      if socat -u /dev/null "TCP:$SOCKS_IP:${SOCKS_PORT:-1080},connect-timeout=3" 2>/dev/null; then
+        dead=$(awk '/^remote /{print $2}' /etc/openvpn/pia.conf | while read -r ip; do
+          awk -v ip="$ip" '$2==ip {print $3; exit}' /run/servers.live; done)
+        for c in $dead; do mark_bad "$c"; done
+        why="no answer from: $(echo $dead)"
+      else
+        why="proxy $SOCKS_IP unreachable"
+      fi
       next=$(echo "${SOCKS_ALL:-$SOCKS_IP}" | tr ' ' '\n' | awk -v cur="$SOCKS_IP" '{a[NR]=$0; if ($0==cur) i=NR} END {print a[i % NR + 1]}')
       if [ -n "$next" ] && [ "$next" != "$SOCKS_IP" ]; then
         ip route replace "$next/32" via "$ETH_GW" dev eth0 && SOCKS_IP=$next && export SOCKS_IP
       fi
-      # every server openvpn tried in these STUCK_AFTER seconds failed: avoid them for BAD_TTL
-      dead=$(awk '/^remote /{print $2}' /etc/openvpn/pia.conf | while read -r ip; do
-        awk -v ip="$ip" '$2==ip {print $3; exit}' /run/servers.live; done)
-      for c in $dead; do mark_bad "$c"; done
-      log "tunnel down for $(( now - down_since ))s (no answer from: $(echo $dead)) -> reconnecting via proxy $SOCKS_IP"
+      log "tunnel down for $(( now - down_since ))s ($why) -> reconnecting via proxy $SOCKS_IP"
       /gen-conf.sh $(busy_cns) >/dev/null
       kill -HUP "$OVPN_PID"
       down_since=$now
