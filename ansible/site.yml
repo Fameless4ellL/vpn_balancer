@@ -30,6 +30,20 @@
       - monitoring/grafana/provisioning/dashboards
       - monitoring/grafana/dashboards
     vpn_monitoring_ports: ["{{ grafana_port }}", "{{ prometheus_port }}", "{{ alertmanager_port }}"]
+    # Ports opened in the active firewall (firewalld or ufw), as port/proto
+    vpn_firewall_ports: >-
+      {{ (['%s/tcp' % lb_socks_port, '%s/tcp' % lb_http_port, '%s/udp' % wg_port] if vpn_open_firewall | bool else [])
+      + (vpn_monitoring_ports | map('regex_replace', '$', '/tcp') | list
+         if vpn_monitoring | bool and monitoring_bind != '127.0.0.1' else []) }}
+    vpn_packages:
+      RedHat: [podman, podman-compose, python3, make, curl, openssl, unzip]
+      # uidmap: newuidmap for rootless; netavark + aardvark-dns: container names (vpn1, haproxy...) resolve
+      # inside the compose network; dbus-user-session: podman build creates cgroups through the user's D-Bus;
+      # fuse-overlayfs: overlay storage where the kernel can't do it rootless natively
+      Debian: [podman, podman-compose, python3, make, curl, openssl, unzip, uidmap, slirp4netns, passt,
+               netavark, aardvark-dns, dbus-user-session, fuse-overlayfs]
+    vpn_containers: "{{ ['vpn1', 'vpn2', 'vpn-lb', 'vpn-gw']
+      + (['vpn-prometheus', 'vpn-alertmanager', 'vpn-grafana'] if vpn_monitoring | bool else []) }}"
     vpn_telegram: "{{ telegram_chat_id | string | length > 0 and telegram_bot_token | length > 0 }}"
     vpn_xdg_env:
       XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts.user_uid }}"
@@ -38,10 +52,46 @@
     - name: Host preparation (root)
       become: true
       block:
-        - name: Install packages
+        # Older Debian/Ubuntu ship Podman without netavark/aardvark-dns: HAProxy could not resolve vpn1/vpn2
+        - name: Check the OS
+          ansible.builtin.assert:
+            that: >-
+              ansible_facts.os_family == 'RedHat'
+              or (ansible_facts.distribution == 'Debian' and ansible_facts.distribution_major_version | int >= 12)
+              or (ansible_facts.distribution == 'Ubuntu' and ansible_facts.distribution_major_version | int >= 24)
+            fail_msg: >-
+              {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }} is not supported:
+              use Fedora/RHEL, Debian 12+ or Ubuntu 24.04+.
+
+        - name: Install packages (Fedora/RHEL)
           ansible.builtin.package:
-            name: [podman, podman-compose, python3, make, curl, openssl, unzip]
+            name: "{{ vpn_packages.RedHat }}"
             state: present
+          when: ansible_facts.os_family == 'RedHat'
+
+        - name: Install packages (Debian/Ubuntu)
+          ansible.builtin.apt:
+            name: "{{ vpn_packages.Debian }}"
+            state: present
+            update_cache: true
+            cache_valid_time: 3600
+          when: ansible_facts.os_family == 'Debian'
+
+        - name: Look for the user's subordinate ids
+          ansible.builtin.shell: grep -q '^{{ ansible_facts.user_id }}:' /etc/subuid && grep -q '^{{ ansible_facts.user_id }}:' /etc/subgid
+          register: vpn_subids
+          changed_when: false
+          failed_when: vpn_subids.rc > 1
+          check_mode: false
+
+        # Rootless Podman maps the container's users onto them; users created before uidmap was installed have none
+        - name: Give the user subordinate ids
+          ansible.builtin.command: >-
+            usermod --add-subuids {{ vpn_subid_start }}-{{ vpn_subid_start | int + 65535 }}
+            --add-subgids {{ vpn_subid_start }}-{{ vpn_subid_start | int + 65535 }} {{ ansible_facts.user_id }}
+          vars:
+            vpn_subid_start: "{{ 100000 + (ansible_facts.user_uid | int - 1000) * 65536 }}"
+          when: vpn_subids.rc != 0
 
         - name: Load the tun module now and on boot
           community.general.modprobe:
@@ -61,31 +111,66 @@
           args:
             creates: /var/lib/systemd/linger/{{ ansible_facts.user_id }}
 
-        - name: Open proxy ports on the LAN
-          ansible.posix.firewalld:
-            port: "{{ item }}/tcp"
-            permanent: true
-            immediate: true
-            state: enabled
-          loop: ["{{ lb_socks_port }}", "{{ lb_http_port }}"]
-          when: vpn_open_firewall | bool
+        - name: Find the active firewall
+          ansible.builtin.shell: |
+            if systemctl is-active -q firewalld; then echo firewalld
+            elif command -v ufw >/dev/null && ufw status | grep -q '^Status: active'; then echo ufw
+            fi
+          register: vpn_firewall
+          changed_when: false
+          check_mode: false
+          when: vpn_firewall_ports | length > 0
 
-        - name: Open the WireGuard port on the LAN
+        # Proxy + WireGuard ports when published on the LAN, monitoring UIs when not bound to 127.0.0.1
+        - name: Open ports on the LAN (firewalld)
           ansible.posix.firewalld:
-            port: "{{ wg_port }}/udp"
+            port: "{{ item }}"
             permanent: true
             immediate: true
             state: enabled
-          when: vpn_open_firewall | bool
+          loop: "{{ vpn_firewall_ports }}"
+          when: vpn_firewall_ports | length > 0 and vpn_firewall.stdout == 'firewalld'
 
-        - name: Open monitoring ports on the LAN
-          ansible.posix.firewalld:
-            port: "{{ item }}/tcp"
-            permanent: true
-            immediate: true
-            state: enabled
-          loop: "{{ vpn_monitoring_ports }}"
-          when: vpn_monitoring | bool and monitoring_bind != '127.0.0.1'
+        - name: Open ports on the LAN (ufw)
+          community.general.ufw:
+            rule: allow
+            port: "{{ item.split('/')[0] }}"
+            proto: "{{ item.split('/')[1] }}"
+          loop: "{{ vpn_firewall_ports }}"
+          when: vpn_firewall_ports | length > 0 and vpn_firewall.stdout == 'ufw'
+
+    # Debian 12 ships no storage.conf and Podman then defaults to vfs (a full copy of every layer, fills the disk).
+    # Only before Podman's first use: switching the driver of existing storage breaks its images.
+    - name: Look for existing Podman storage
+      ansible.builtin.stat:
+        path: "{{ ansible_facts.user_dir }}/.local/share/containers/storage"
+      register: vpn_storage
+      when: ansible_facts.os_family == 'Debian'
+
+    - name: Use the overlay storage driver
+      when: ansible_facts.os_family == 'Debian' and not vpn_storage.stat.exists
+      block:
+        - name: Create the Podman config directory
+          ansible.builtin.file:
+            path: "{{ ansible_facts.user_dir }}/.config/containers"
+            state: directory
+            mode: "0755"
+
+        - name: Write storage.conf
+          ansible.builtin.copy:
+            content: "[storage]\ndriver = \"overlay\"\n"
+            dest: "{{ ansible_facts.user_dir }}/.config/containers/storage.conf"
+            mode: "0644"
+            force: false
+
+    # dbus-user-session installed above only takes effect at the next login otherwise
+    - name: Start the user's D-Bus
+      ansible.builtin.systemd_service:
+        name: dbus.socket
+        scope: user
+        state: started
+      environment: "{{ vpn_xdg_env }}"
+      when: ansible_facts.os_family == 'Debian'
 
     - name: Check that the PIA client is installed (servers.txt and the CA certificate come from it)
       ansible.builtin.stat:
@@ -237,6 +322,22 @@
 
     - name: Apply pending restarts
       ansible.builtin.meta: flush_handlers
+
+    # podman-compose exits 0 even when a container could not be built or created
+    - name: List the stack's containers
+      ansible.builtin.command: >-
+        podman ps --filter label=com.docker.compose.project.working_dir={{ vpn_deploy_dir }}
+        --format '{{ "{{" }}.Names{{ "}}" }}'
+      register: vpn_ps
+      changed_when: false
+      check_mode: false
+
+    - name: Check that every container is running
+      ansible.builtin.assert:
+        that: vpn_containers | difference(vpn_ps.stdout_lines) | length == 0
+        fail_msg: >-
+          Not running: {{ vpn_containers | difference(vpn_ps.stdout_lines) | join(', ') }}.
+          Run make up in {{ vpn_deploy_dir }} to see the error.
 
     # curl, not uri: uri has no SOCKS5 proxy support
     - name: Wait for a public IP through the balancer  # noqa: command-instead-of-module

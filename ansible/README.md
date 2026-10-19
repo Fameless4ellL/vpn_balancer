@@ -6,6 +6,12 @@ makes it come back after reboot and checks the public IP through the balancer.
 
 The target needs the PIA client installed (`/opt/piavpn`); `servers.txt` and the CA certificate come from it.
 
+Supported targets: Fedora/RHEL (RHEL/Alma/Rocky need EPEL for podman-compose), Debian 12+, Ubuntu 24.04+.
+On Debian/Ubuntu the playbook also installs uidmap, netavark/aardvark-dns and dbus-user-session, gives the user
+subuid/subgid ranges if missing and, before Podman's first use, sets the overlay storage driver (Debian 12 would
+default to vfs and fill the disk). Ports are opened in whichever firewall is active: firewalld or ufw.
+The target only needs a sudo user with SSH key login and python3.
+
 ```sh
 sudo dnf install ansible        # includes ansible.posix and community.general
 cd ansible

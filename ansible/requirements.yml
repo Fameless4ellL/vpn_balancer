@@ -1,3 +1,3 @@
 collections:
   - name: ansible.posix       # seboolean, firewalld
-  - name: community.general   # modprobe
+  - name: community.general   # modprobe, ufw
