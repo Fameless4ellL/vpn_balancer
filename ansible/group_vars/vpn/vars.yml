@@ -5,7 +5,7 @@ vpn_deploy_dir: "{{ ansible_facts.user_dir }}/.local/share/vpn_balancer"
 vpn1_region: france   # not the local PIA client's region: one account can't share a server
 vpn2_region: france
 pia_port: 853
-socks_host: 77.247.181.216   # the PIA client's own proxy: the host routes it past the client's tunnel
+socks_host: 77.247.181.216,109.201.152.162   # tunnel N uses the N-th proxy; a stuck tunnel moves to the next one
 socks_port: 1080
 rotate_period: 6000
 bind: 0.0.0.0          # 127.0.0.1 = this machine only, 0.0.0.0 = whole LAN (no auth!)
