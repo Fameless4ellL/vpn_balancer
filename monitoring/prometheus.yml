@@ -20,6 +20,11 @@ scrape_configs:
         regex: haproxy_server_(status|weight|current_sessions|sessions_total|bytes_in_total|bytes_out_total|check_duration_seconds|check_failures_total|downtime_seconds_total)|haproxy_backend_(current_sessions|sessions_total)|haproxy_process_start_time_seconds
         action: keep
 
+  - job_name: pia
+    scrape_interval: 60s
+    static_configs:
+      - targets: [pia-exporter:9101]
+
   - job_name: prometheus
     static_configs:
       - targets: [localhost:9090]

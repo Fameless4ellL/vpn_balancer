@@ -22,6 +22,7 @@
     vpn_monitoring_files:
       - monitoring/prometheus.yml
       - monitoring/rules.yml
+      - monitoring/pia-exporter.sh
       - monitoring/grafana/provisioning/datasources/prometheus.yml
       - monitoring/grafana/provisioning/dashboards/vpn.yml
       - monitoring/grafana/dashboards/vpn.json
@@ -43,7 +44,7 @@
       Debian: [podman, podman-compose, python3, make, curl, openssl, unzip, uidmap, slirp4netns, passt,
                netavark, aardvark-dns, dbus-user-session, fuse-overlayfs]
     vpn_containers: "{{ ['vpn1', 'vpn2', 'vpn-lb', 'vpn-gw']
-      + (['vpn-prometheus', 'vpn-alertmanager', 'vpn-grafana'] if vpn_monitoring | bool else []) }}"
+      + (['vpn-prometheus', 'vpn-alertmanager', 'vpn-grafana', 'vpn-pia-exporter'] if vpn_monitoring | bool else []) }}"
     vpn_telegram: "{{ telegram_chat_id | string | length > 0 and telegram_bot_token | length > 0 }}"
     vpn_xdg_env:
       XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts.user_uid }}"
@@ -396,6 +397,6 @@
     # A dashboard or alert-rule change must not reconnect the tunnels. Skipped when the whole stack
     # was (re)started in this run - the containers already read the new files.
     - name: Restart monitoring
-      ansible.builtin.command: podman restart vpn-prometheus vpn-alertmanager vpn-grafana
+      ansible.builtin.command: podman restart vpn-prometheus vpn-alertmanager vpn-grafana vpn-pia-exporter
       when: vpn_running.stdout != '' and vpn_restarted is not defined
       changed_when: true

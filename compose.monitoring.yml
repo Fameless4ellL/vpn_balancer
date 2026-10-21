@@ -51,6 +51,19 @@ services:
     ports:
       - "${MONITORING_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
 
+  # Age of the PIA client's server list (data.json) - see monitoring/pia-exporter.sh
+  pia-exporter:
+    image: localhost/pia-tunnel:latest
+    container_name: vpn-pia-exporter
+    restart: always
+    entrypoint: ["sh", "/pia-exporter.sh"]
+    healthcheck: { disable: true }
+    environment:
+      PIA_REGIONS: ${VPN1_REGION} ${VPN2_REGION}
+    volumes:
+      - ./monitoring/pia-exporter.sh:/pia-exporter.sh:ro,z
+      - /opt/piavpn/etc:/run/pia-etc:ro
+
 volumes:
   prometheus-data:
   alertmanager-data:

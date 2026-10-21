@@ -64,3 +64,50 @@ groups:
         annotations:
           summary: Prometheus cannot scrape HAProxy
           description: vpn-lb is down or its metrics endpoint (:8405) does not answer - tunnel alerts cannot fire.
+
+  # The tunnels pick servers from the PIA client's data.json (gen-conf.sh). If it goes stale, they keep
+  # reconnecting to servers PIA has already moved or retired, with nothing in the logs.
+  - name: pia-alerts
+    rules:
+      # The daemon rewrites data.json every 10 min while it runs; an hour without a write = it is stopped
+      - alert: PIAServerListStale
+        expr: time() - pia_data_json_mtime_seconds > 3600
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PIA server list is {{ $value | humanizeDuration }} old"
+          description: >-
+            The PIA client has not updated /opt/piavpn/etc/data.json - its daemon is probably stopped.
+            Tunnels reconnect from an outdated server list. Check: systemctl status piavpn; piactl get connectionstate
+
+      - alert: PIAServerListUnreadable
+        expr: pia_data_json_readable == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: PIA server list (data.json) cannot be read
+          description: >-
+            /opt/piavpn/etc/data.json is missing or unreadable - tunnels fall back to the servers.txt snapshot
+            from the last make up. Is the PIA client installed and its daemon running?
+
+      - alert: PIARegionNoServers
+        expr: pia_region_servers == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No PIA servers for region {{ $labels.region }} in data.json"
+          description: >-
+            The region is offline, renamed, has no OpenVPN UDP servers, or PIA changed the data.json format.
+            Tunnels fall back to servers.txt. Check: make regions
+
+      - alert: PIAExporterDown
+        expr: up{job="pia"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Prometheus cannot scrape pia-exporter
+          description: vpn-pia-exporter is down - the PIA server-list alerts cannot fire.
