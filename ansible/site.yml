@@ -320,6 +320,52 @@
         enabled: true
       environment: "{{ vpn_xdg_env }}"
 
+    # Every rebuild of the tunnel image leaves the previous one dangling, together with its build layers.
+    # Only dangling images go: tagged ones stay even when unused, they may belong to other projects.
+    - name: Create the user's systemd unit directory
+      ansible.builtin.file:
+        path: "{{ ansible_facts.user_dir }}/.config/systemd/user"
+        state: directory
+        mode: "0755"
+
+    - name: Write the monthly image cleanup units
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "{{ ansible_facts.user_dir }}/.config/systemd/user/{{ item.name }}"
+        mode: "0644"
+      loop:
+        - name: vpn-image-prune.service
+          content: |
+            [Unit]
+            Description=Remove dangling Podman images left by old builds
+
+            [Service]
+            Type=oneshot
+            ExecStart=/usr/bin/podman image prune --force
+        - name: vpn-image-prune.timer
+          content: |
+            [Unit]
+            Description=Monthly removal of dangling Podman images
+
+            [Timer]
+            OnCalendar=monthly
+            RandomizedDelaySec=6h
+            Persistent=true
+
+            [Install]
+            WantedBy=timers.target
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Enable the monthly image cleanup
+      ansible.builtin.systemd_service:
+        name: vpn-image-prune.timer
+        scope: user
+        enabled: true
+        state: started
+        daemon_reload: true
+      environment: "{{ vpn_xdg_env }}"
+
     - name: Apply pending restarts
       ansible.builtin.meta: flush_handlers
 

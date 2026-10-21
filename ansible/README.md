@@ -2,7 +2,8 @@
 
 Deploys the stack to any self-hosted Linux machine (this one or another box on the LAN): installs Podman,
 loads `tun`, sets the SELinux boolean, enables linger, writes `.env` and credentials, starts the stack,
-makes it come back after reboot and checks the public IP through the balancer.
+makes it come back after reboot and checks the public IP through the balancer. A monthly user timer
+(`vpn-image-prune.timer`) removes dangling images left by old builds; tagged images are never touched.
 
 The target needs the PIA client installed (`/opt/piavpn`); `servers.txt` and the CA certificate come from it.
 
