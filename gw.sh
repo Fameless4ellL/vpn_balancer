@@ -107,7 +107,7 @@ done)
 
 cat > /etc/sing-box.json <<JSON
 {
-  "log": { "level": "warn" },
+  "log": { "level": "warn", "disable_color": true },
   "dns": { "servers": [{ "type": "local", "tag": "local" }] },
   "endpoints": [{
     "type": "wireguard", "tag": "wg", "system": false, "mtu": $WG_MTU,
@@ -131,7 +131,25 @@ cat > /etc/sing-box.json <<JSON
 }
 JSON
 sing-box check -c /etc/sing-box.json
-sing-box run -c /etc/sing-box.json &
+# A client's torrent/P2P app opens thousands of connections to dead peers; each one the tunnel's SOCKS5
+# server refuses is an ERROR line (~350k/day in the journal). Count those and log a summary every
+# 10 min instead; blank lines are dropped, everything else passes through.
+rm -f /tmp/sing-box.log; mkfifo /tmp/sing-box.log
+awk '
+  function flush() {
+    if (n) { s = ""; for (c in by) s = s " code=" c ":" by[c]
+             printf "%s vpn-gw: %d connection(s) refused by the tunnel in %d s (SOCKS5%s)\n",
+                    strftime("%Y-%m-%d %H:%M:%S", systime()), n, systime() - t0, s; fflush() }
+    n = 0; delete by; t0 = systime()
+  }
+  BEGIN { t0 = systime() }
+  /socks5: request rejected, code=/ { n++; c = $0; sub(/.*code=/, "", c); by[c]++
+                                      if (systime() - t0 >= 600) flush(); next }
+  /^[[:space:]]*$/ { next }
+  { print; fflush() }
+  END { flush() }
+' < /tmp/sing-box.log &
+sing-box run -c /etc/sing-box.json > /tmp/sing-box.log 2>&1 &
 PID=$!
 trap 'kill -TERM "$PID" 2>/dev/null' TERM INT
 
