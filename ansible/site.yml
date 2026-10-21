@@ -320,6 +320,34 @@
         enabled: true
       environment: "{{ vpn_xdg_env }}"
 
+    # An old hand-made unit started only vpn1 vpn2 vpn-lb (no vpn-gw, no monitoring); podman-restart covers it all
+    - name: Look for the legacy vpn-balancer.service
+      ansible.builtin.stat:
+        path: "{{ ansible_facts.user_dir }}/.config/systemd/user/vpn-balancer.service"
+      register: vpn_legacy_unit
+
+    - name: Remove the legacy vpn-balancer.service
+      when: vpn_legacy_unit.stat.exists
+      block:
+        # Disable only: stopping it would run its ExecStop and take the tunnels down
+        - name: Disable the legacy unit
+          ansible.builtin.systemd_service:
+            name: vpn-balancer.service
+            scope: user
+            enabled: false
+          environment: "{{ vpn_xdg_env }}"
+
+        - name: Delete the legacy unit file
+          ansible.builtin.file:
+            path: "{{ vpn_legacy_unit.stat.path }}"
+            state: absent
+
+        - name: Reload the user's systemd
+          ansible.builtin.systemd_service:
+            daemon_reload: true
+            scope: user
+          environment: "{{ vpn_xdg_env }}"
+
     # Every rebuild of the tunnel image leaves the previous one dangling, together with its build layers.
     # Only dangling images go: tagged ones stay even when unused, they may belong to other projects.
     - name: Create the user's systemd unit directory
