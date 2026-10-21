@@ -107,7 +107,7 @@ done)
 
 cat > /etc/sing-box.json <<JSON
 {
-  "log": { "level": "warn", "disable_color": true },
+  "log": { "level": "warn" },
   "dns": { "servers": [{ "type": "local", "tag": "local" }] },
   "endpoints": [{
     "type": "wireguard", "tag": "wg", "system": false, "mtu": $WG_MTU,
@@ -143,6 +143,7 @@ awk '
     n = 0; delete by; t0 = systime()
   }
   BEGIN { t0 = systime() }
+  { gsub(/\033\[[0-9;]*m/, "") }   # sing-box colors its levels even when not on a terminal
   /socks5: request rejected, code=/ { n++; c = $0; sub(/.*code=/, "", c); by[c]++
                                       if (systime() - t0 >= 600) flush(); next }
   /^[[:space:]]*$/ { next }
