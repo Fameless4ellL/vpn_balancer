@@ -69,9 +69,9 @@ groups:
   # reconnecting to servers PIA has already moved or retired, with nothing in the logs.
   - name: pia-alerts
     rules:
-      # The daemon rewrites data.json every 10 min while it runs; an hour without a write = it is stopped
+      # The daemon rewrites data.json about every 10 min, but 2h+ pauses happen while it runs; 3h without a write = it is stopped
       - alert: PIAServerListStale
-        expr: time() - pia_data_json_mtime_seconds > 3600
+        expr: time() - pia_data_json_mtime_seconds > 10800
         for: 5m
         labels:
           severity: warning
